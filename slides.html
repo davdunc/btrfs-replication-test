@@ -366,28 +366,23 @@ NoNewPrivileges=true</code></pre>
 <h3>The OpenSSH model, applied to agents</h3>
 <div class="mermaid">
 flowchart TB
-    subgraph Privsep["Privilege Separation"]
-        direction TB
-        subgraph Monitor["agent-monitor (root)"]
-            direction TB
-            CFG["Reads /etc/agent-config/<br/>agent-build/mcp.json"]
-            POLICY["Validates requests<br/>against MCP policy"]
-            EXEC["Executes privileged ops<br/>(mount, snapshot, network)"]
-            CFG --> POLICY --> EXEC
-        end
-        subgraph Child["agent-runtime (agent-build UID)"]
-            direction TB
-            WORK["Processes tasks"]
-            MEM["Reads/writes ~/memory"]
-            TOOLS["Uses MCP tools<br/>(sandboxed)"]
-        end
-        Child -->|"Request: snapshot /data/model"| Monitor
-        Monitor -->|"✅ Allowed by mcp.json"| Child
-        Child -->|"Request: read /etc/shadow"| Monitor
-        Monitor -->|"❌ Denied by mcp.json"| Child
+    subgraph Monitor["agent-monitor (root)"]
+        CFG["Reads /etc/agent-config/mcp.json"]
+        POLICY["Validates against MCP policy"]
+        EXEC["Executes privileged ops"]
+        CFG --> POLICY --> EXEC
     end
+    subgraph Child["agent-runtime (agent-build UID)"]
+        WORK["Processes tasks"]
+        MEM["Reads/writes ~/memory"]
+        TOOLS["Uses MCP tools — sandboxed"]
+    end
+    Child -->|"snapshot /data/model"| Monitor
+    Monitor -->|"Allowed by mcp.json"| Child
+    Child -->|"read /etc/shadow"| Monitor
+    Monitor -->|"DENIED by mcp.json"| Child
     subgraph Config["/etc/agent-config/agent-build/"]
-        MCP["mcp.json<br/>root:agents 0644<br/>Agent reads, cannot write"]
+        MCP["mcp.json — root:agents 0644"]
     end
     Config -.->|"read-only bind mount"| Monitor
 </div>
