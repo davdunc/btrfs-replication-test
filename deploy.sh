@@ -29,24 +29,39 @@ aws ec2 authorize-security-group-ingress --region "$REGION" \
 echo "Security group: $SG_ID"
 
 # --- User data: install btrfs-progs, format attached volume ---
-USERDATA=$(cat <<'CLOUD'
+# Source: creates writable /data/model subvolume for writing model data
+USERDATA_SRC=$(cat <<'CLOUD'
 #!/bin/bash
 dnf install -y btrfs-progs
-# Wait for the data volume to attach
 while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
 mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
 mkdir -p /data
-mount /dev/nvme1n1 /data
+mount -o noatime /dev/nvme1n1 /data
 echo 'LABEL=btrfs-data /data btrfs defaults,noatime 0 0' >> /etc/fstab
-# Create the model subvolume
 btrfs subvolume create /data/model
 CLOUD
 )
-USERDATA_B64=$(echo "$USERDATA" | base64)
+
+# Target: only formats and mounts — no subvolume created.
+# Subvolumes arrive via btrfs receive; writable snapshots created from those.
+USERDATA_TGT=$(cat <<'CLOUD'
+#!/bin/bash
+dnf install -y btrfs-progs
+while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
+mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
+mkdir -p /data
+mount -o noatime /dev/nvme1n1 /data
+echo 'LABEL=btrfs-data /data btrfs defaults,noatime 0 0' >> /etc/fstab
+CLOUD
+)
+
+USERDATA_SRC_B64=$(echo "$USERDATA_SRC" | base64)
+USERDATA_TGT_B64=$(echo "$USERDATA_TGT" | base64)
 
 # --- Launch function ---
 launch_instance() {
   local name=$1
+  local ud_b64=$2
   aws ec2 run-instances \
     --region "$REGION" \
     --image-id "$AMI" \
@@ -59,17 +74,17 @@ launch_instance() {
       {\"DeviceName\":\"/dev/sda1\",\"Ebs\":{\"VolumeSize\":20,\"VolumeType\":\"gp3\"}},
       {\"DeviceName\":\"/dev/sdf\",\"Ebs\":{\"VolumeSize\":${VOL_SIZE},\"VolumeType\":\"gp3\",\"DeleteOnTermination\":true}}
     ]" \
-    --user-data "$USERDATA_B64" \
+    --user-data "$ud_b64" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${name}},{Key=${TAG_KEY},Value=${TAG_VAL}}]" \
     --query 'Instances[0].InstanceId' --output text
 }
 
 echo "Launching source instance..."
-SRC_ID=$(launch_instance "btrfs-source")
+SRC_ID=$(launch_instance "btrfs-source" "$USERDATA_SRC_B64")
 echo "Source: $SRC_ID"
 
 echo "Launching target instance..."
-TGT_ID=$(launch_instance "btrfs-target")
+TGT_ID=$(launch_instance "btrfs-target" "$USERDATA_TGT_B64")
 echo "Target: $TGT_ID"
 
 echo "Waiting for instances to be running..."

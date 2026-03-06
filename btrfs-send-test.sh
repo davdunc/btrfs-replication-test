@@ -18,7 +18,9 @@ echo "Snapshot created: /data/model-snap-v1"
 
 echo "=== Step 3: Send snapshot to target ==="
 # btrfs send streams the snapshot over SSH to btrfs receive on the target
-btrfs send /data/model-snap-v1 | \
+# --proto 2 --compressed-data: use v2 stream format, send compressed extents
+# without decompressing (requires kernel 6.0+ on both sides)
+btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
   ssh -o StrictHostKeyChecking=no "fedora@${TARGET_PRIV}" \
   'sudo btrfs receive /data/'
 
@@ -32,15 +34,19 @@ echo "=== Step 5: Create second snapshot ==="
 btrfs subvolume snapshot -r /data/model /data/model-snap-v2
 
 echo "=== Step 6: Send INCREMENTAL delta (v1 → v2) ==="
-btrfs send -p /data/model-snap-v1 /data/model-snap-v2 | \
+btrfs send --proto 2 --compressed-data -p /data/model-snap-v1 /data/model-snap-v2 | \
   ssh -o StrictHostKeyChecking=no "fedora@${TARGET_PRIV}" \
   'sudo btrfs receive /data/'
 
 echo "=== Incremental send complete ==="
 echo ""
 echo "On the target, you now have:"
-echo "  /data/model-snap-v1  (full baseline)"
-echo "  /data/model-snap-v2  (incremental update)"
+echo "  /data/model-snap-v1  (full baseline, read-only)"
+echo "  /data/model-snap-v2  (incremental update, read-only)"
 echo ""
-echo "To make v2 writable on the target:"
+echo "To make v2 writable on the target for serving:"
 echo "  sudo btrfs subvolume snapshot /data/model-snap-v2 /data/model"
+echo ""
+echo "IMPORTANT: Do NOT change received read-only snapshots to read-write"
+echo "  (this breaks received_uuid and future incremental sends)."
+echo "  Always create a new writable snapshot instead."
