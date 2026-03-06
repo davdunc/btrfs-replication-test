@@ -403,15 +403,15 @@ flowchart TB
     RT <--> S
     RT <--> LT
     subgraph Working["Working Memory"]
-        W["tmpfs (RAM)<br/>512MB ⏱️ Minutes"]
+        W["tmpfs — RAM — Minutes"]
     end
     subgraph Session["Session Memory"]
-        S["btrfs subvolume<br/>~/memory/session/ ⏱️ Hours–Days"]
-        SS["📸 Snapshots → btrfs send/receive"]
+        S["btrfs subvolume — Hours to Days"]
+        SS["Snapshots via btrfs send/receive"]
     end
     S --- SS
     subgraph LongTerm["Long-Term Memory"]
-        LT["AgentCore / MemoriesDB<br/>~/memory/long-term/ ⏱️ Persistent"]
+        LT["AgentCore / MemoriesDB — Persistent"]
     end
     RESTART["Agent killed / recreated"] -.->|"cleared"| W
     RESTART -.->|"preserved"| S
