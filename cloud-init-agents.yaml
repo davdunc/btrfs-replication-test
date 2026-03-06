@@ -1,0 +1,123 @@
+#cloud-config
+# Agent-as-User provisioning via cloud-init
+# Each agent gets: UID, btrfs subvolume home, systemd service, cgroup limits
+
+# --- Agent user accounts ---
+users:
+  - name: agent-build
+    system: true
+    shell: /usr/bin/agent-shell
+    groups: [agents]
+    no_create_home: true  # we create btrfs subvolume homes below
+
+  - name: agent-review
+    system: true
+    shell: /usr/bin/agent-shell
+    groups: [agents]
+    no_create_home: true
+
+  - name: agent-deploy
+    system: true
+    shell: /usr/bin/agent-shell
+    groups: [agents]
+    no_create_home: true
+
+# --- Packages ---
+packages:
+  - btrfs-progs
+  - python3-pip
+
+# --- Filesystem setup ---
+runcmd:
+  # Format and mount data volume as btrfs
+  - |
+    if [ ! -b /dev/nvme1n1 ]; then
+      echo "Waiting for data volume..."
+      while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
+    fi
+  - mkfs.btrfs -f -L agent-data /dev/nvme1n1
+  - mkdir -p /data
+  - mount -o noatime,compress=zstd /dev/nvme1n1 /data
+  - echo 'LABEL=agent-data /data btrfs defaults,noatime,compress=zstd 0 0' >> /etc/fstab
+
+  # Create agent home subvolumes
+  - btrfs subvolume create /data/agents
+  - |
+    for agent in agent-build agent-review agent-deploy; do
+      btrfs subvolume create /data/agents/${agent}
+      mkdir -p /data/agents/${agent}/{memory/working,memory/session,memory/long-term,tools,work}
+      chown -R ${agent}:agents /data/agents/${agent}
+      # Bind-mount subvolume as home directory
+      mkdir -p /home/${agent}
+      mount --bind /data/agents/${agent} /home/${agent}
+      # Append-only work log
+      touch /home/${agent}/work/actions.log
+      chattr +a /home/${agent}/work/actions.log
+    done
+
+  # Working memory on tmpfs (cleared on restart)
+  - |
+    for agent in agent-build agent-review agent-deploy; do
+      mount -t tmpfs -o size=512M,uid=$(id -u ${agent}),gid=$(id -g agents) \
+        tmpfs /home/${agent}/memory/working
+    done
+
+  # Install agent systemd units
+  - systemctl daemon-reload
+  - systemctl enable --now agent@build agent@review agent@deploy
+
+# --- systemd unit template ---
+write_files:
+  - path: /etc/systemd/system/agent@.service
+    content: |
+      [Unit]
+      Description=Agent %i
+      After=network-online.target data.mount
+
+      [Service]
+      Type=notify
+      User=agent-%i
+      Group=agents
+      WorkingDirectory=/home/agent-%i
+      Environment=AGENT_NAME=%i
+      Environment=AGENT_MEMORY_DIR=/home/agent-%i/memory
+      Environment=AGENT_WORK_DIR=/home/agent-%i/work
+      ExecStart=/home/agent-%i/tools/agent-runtime
+      Restart=always
+      RestartSec=5
+
+      # Cgroup resource limits
+      CPUQuota=200%%
+      MemoryMax=8G
+      IOWeight=100
+
+      # Systemd sandboxing
+      ProtectSystem=strict
+      ProtectHome=tmpfs
+      BindPaths=/home/agent-%i
+      PrivateTmp=true
+      NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/agent@.socket
+    content: |
+      [Unit]
+      Description=Agent %i activation socket
+
+      [Socket]
+      ListenStream=/run/agents/%i.sock
+      SocketUser=agent-%i
+      SocketGroup=agents
+      SocketMode=0660
+
+      [Install]
+      WantedBy=sockets.target
+
+  - path: /usr/bin/agent-shell
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Agent shell — drops into agent runtime instead of interactive bash
+      exec /home/${USER}/tools/agent-runtime --interactive
