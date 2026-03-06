@@ -75,17 +75,17 @@ rsync reads all 140GB just to figure that out.</p>
 flowchart LR
     subgraph Source["TRAINING NODE (p5.48xlarge)"]
         direction TB
-        M["/data/model"] --> S1["/data/model-snap-v1&#10;🔒 read-only"]
-        M --> S2["/data/model-snap-v2&#10;🔒 read-only"]
+        M["/data/model"] --> S1["/data/model-snap-v1<br/>🔒 read-only"]
+        M --> S2["/data/model-snap-v2<br/>🔒 read-only"]
     end
-    S2 -- "btrfs send --proto 2&#10;incremental delta" --> TEE((tee))
+    S2 -- "btrfs send --proto 2<br/>incremental delta" --> TEE((tee))
     TEE -- "SSH pipe" --> T1
     TEE -- "SSH pipe" --> T2
     TEE -- "SSH pipe" --> T3
     subgraph Targets["INFERENCE FLEET"]
-        T1["Inference Node 1&#10;/data/model-snap-v2"]
-        T2["Inference Node 2&#10;/data/model-snap-v2"]
-        T3["Inference Node N&#10;/data/model-snap-v2"]
+        T1["Inference Node 1<br/>/data/model-snap-v2"]
+        T2["Inference Node 2<br/>/data/model-snap-v2"]
+        T3["Inference Node N<br/>/data/model-snap-v2"]
     end
 </div>
 <p>One-to-many via <code>tee</code> — single read, parallel delivery</p>
@@ -264,43 +264,31 @@ And what if the agents themselves are just <strong>Linux users</strong>?</p>
 <div class="mermaid">
 flowchart TB
     subgraph Host["Linux Host"]
-        direction TB
-        subgraph SysConfig["/etc/agent-config/ (root-owned)"]
-            direction LR
-            C1["agent-build/&#10;mcp.json"]
-            C2["agent-review/&#10;mcp.json"]
-            C3["agent-deploy/&#10;mcp.json"]
+        subgraph SysConfig["/etc/agent-config/ — root-owned"]
+            C1["agent-build/mcp.json"]
+            C2["agent-review/mcp.json"]
+            C3["agent-deploy/mcp.json"]
         end
-        subgraph Agents["Agent Users (UIDs)"]
-            direction LR
-            subgraph A1["agent-build"]
-                A1M["~/memory"]
-                A1T["~/tools"]
-                A1W["~/work"]
-            end
-            subgraph A2["agent-review"]
-                A2M["~/memory"]
-                A2T["~/tools"]
-                A2W["~/work"]
-            end
-            subgraph A3["agent-deploy"]
-                A3M["~/memory"]
-                A3T["~/tools"]
-                A3W["~/work"]
-            end
+        subgraph A1["agent-build (UID)"]
+            A1M["~/memory  ~/tools  ~/work"]
+        end
+        subgraph A2["agent-review (UID)"]
+            A2M["~/memory  ~/tools  ~/work"]
+        end
+        subgraph A3["agent-deploy (UID)"]
+            A3M["~/memory  ~/tools  ~/work"]
         end
         C1 -.->|"read-only"| A1
         C2 -.->|"read-only"| A2
         C3 -.->|"read-only"| A3
-        EB["Event Bus&#10;systemd socket activation"]
+        EB["Event Bus — systemd socket activation"]
         A1 --- EB
         A2 --- EB
         A3 --- EB
         subgraph Services["Backing Services"]
-            direction LR
-            MEM["Extended Memory&#10;AgentCore"]
-            MOD["Model Store&#10;btrfs subvolumes"]
-            AUD["Audit Log&#10;journald"]
+            MEM["AgentCore Memory"]
+            MOD["Model Store — btrfs"]
+            AUD["Audit — journald"]
         end
         EB --- Services
     end
@@ -382,16 +370,16 @@ flowchart TB
         direction TB
         subgraph Monitor["agent-monitor (root)"]
             direction TB
-            CFG["Reads /etc/agent-config/&#10;agent-build/mcp.json"]
-            POLICY["Validates requests&#10;against MCP policy"]
-            EXEC["Executes privileged ops&#10;(mount, snapshot, network)"]
+            CFG["Reads /etc/agent-config/<br/>agent-build/mcp.json"]
+            POLICY["Validates requests<br/>against MCP policy"]
+            EXEC["Executes privileged ops<br/>(mount, snapshot, network)"]
             CFG --> POLICY --> EXEC
         end
         subgraph Child["agent-runtime (agent-build UID)"]
             direction TB
             WORK["Processes tasks"]
             MEM["Reads/writes ~/memory"]
-            TOOLS["Uses MCP tools&#10;(sandboxed)"]
+            TOOLS["Uses MCP tools<br/>(sandboxed)"]
         end
         Child -->|"Request: snapshot /data/model"| Monitor
         Monitor -->|"✅ Allowed by mcp.json"| Child
@@ -399,7 +387,7 @@ flowchart TB
         Monitor -->|"❌ Denied by mcp.json"| Child
     end
     subgraph Config["/etc/agent-config/agent-build/"]
-        MCP["mcp.json&#10;root:agents 0644&#10;Agent reads, cannot write"]
+        MCP["mcp.json<br/>root:agents 0644<br/>Agent reads, cannot write"]
     end
     Config -.->|"read-only bind mount"| Monitor
 </div>
@@ -420,15 +408,15 @@ flowchart TB
     RT <--> S
     RT <--> LT
     subgraph Working["Working Memory"]
-        W["tmpfs (RAM)&#10;512MB ⏱️ Minutes"]
+        W["tmpfs (RAM)<br/>512MB ⏱️ Minutes"]
     end
     subgraph Session["Session Memory"]
-        S["btrfs subvolume&#10;~/memory/session/ ⏱️ Hours–Days"]
+        S["btrfs subvolume<br/>~/memory/session/ ⏱️ Hours–Days"]
         SS["📸 Snapshots → btrfs send/receive"]
     end
     S --- SS
     subgraph LongTerm["Long-Term Memory"]
-        LT["AgentCore / MemoriesDB&#10;~/memory/long-term/ ⏱️ Persistent"]
+        LT["AgentCore / MemoriesDB<br/>~/memory/long-term/ ⏱️ Persistent"]
     end
     RESTART["Agent killed / recreated"] -.->|"cleared"| W
     RESTART -.->|"preserved"| S
@@ -443,17 +431,17 @@ Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
 <h2>Event-Driven Activation & microVMs</h2>
 <div class="mermaid">
 flowchart TB
-    EVT["Event arrives&#10;(systemd .socket)"] --> WAKE["Socket activation&#10;spawns agent service"]
+    EVT["Event arrives<br/>(systemd .socket)"] --> WAKE["Socket activation<br/>spawns agent service"]
     WAKE --> EVAL{"Agent evaluates task"}
-    EVAL -->|"Trusted + lightweight"| LOCAL["On-host process&#10;⚡ 0ms overhead"]
-    EVAL -->|"Untrusted / isolated"| MVM["Firecracker microVM&#10;⚡ 125ms boot&#10;~30MB overhead"]
-    EVAL -->|"Heavy compute"| CLOUD["EC2 Spot instance&#10;btrfs send model →&#10;run training →&#10;btrfs send results ←"]
+    EVAL -->|"Trusted + lightweight"| LOCAL["On-host process<br/>⚡ 0ms overhead"]
+    EVAL -->|"Untrusted / isolated"| MVM["Firecracker microVM<br/>⚡ 125ms boot<br/>~30MB overhead"]
+    EVAL -->|"Heavy compute"| CLOUD["EC2 Spot instance<br/>btrfs send model →<br/>run training →<br/>btrfs send results ←"]
     LOCAL --> RESULT["Results → ~/work/"]
     MVM --> RESULT
     CLOUD --> RESULT
     RESULT --> REVIEW{"Agent reviews output"}
-    REVIEW -->|"Accept"| MERGE["Merge into&#10;agent subvolume"]
-    REVIEW -->|"Reject"| DISCARD["Discard scratch&#10;subvolume"]
+    REVIEW -->|"Accept"| MERGE["Merge into<br/>agent subvolume"]
+    REVIEW -->|"Reject"| DISCARD["Discard scratch<br/>subvolume"]
 </div>
 <p>The agent <strong>IS</strong> the scheduler.</p>
 </section>
@@ -521,7 +509,7 @@ Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
 <h2>What This Doesn't Solve (Yet)</h2>
 <div class="mermaid">
 mindmap
-  root(("What This&#10;Doesn't Solve"))
+  root(("What This<br/>Doesn't Solve"))
     Multi-Host
       Service discovery
       Cross-host DNS
