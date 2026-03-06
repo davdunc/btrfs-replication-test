@@ -199,7 +199,7 @@ btrfs send -p /data/model-snap-v1 /data/model-snap-v2 | \
 |-----------|------|-------------|
 | Snapshot creation | O(1) — metadata only | None |
 | Full send (100 GB model) | O(data size) | ~100 GB |
-| Incremental send (1/4 shards changed) | O(changed shards) | ~25% of model |
+| Incremental send (2% blocks touched) | O(delta) | ~2% of model |
 | Writable snapshot on target | O(1) | None |
 | Rollback to previous version | O(1) | None |
 
@@ -214,14 +214,14 @@ Add `mount -o compress=zstd` for 15-30% savings on model weights.
 | S3 sync + download | O(model) | File-level | Re-download | Low |
 | rsync | O(model) checksum | Block-level | Re-sync | Medium |
 | Container layers | O(layer) | Layer-level | Tag swap | High |
-| **btrfs send/receive** | **O(model)** | **File-level (CoW)** | **Instant** | **None** |
+| **btrfs send/receive** | **O(model)** | **Block-level (CoW)** | **Instant** | **None** |
 
-*Speaker notes: btrfs send compares btree metadata, not file content. CoW means
-any rewritten file has all-new blocks — send transmits the whole file. The win is
-on UNCHANGED files (zero cost) and rollback (instant local snapshots). Sharded
-models benefit because unchanged shards are free. A single monolithic weights.bin
-that gets fully rewritten gains nothing from incremental send — use rsync for that.
-Tradeoff: need btrfs on both ends.*
+*Speaker notes: btrfs CoW tracks which 4K blocks were actually written. With mmap-based
+formats (safetensors, GGUF) or partial writes, only touched blocks get new extents —
+send -p transmits a true block-level delta. Same for agent session memory (append/update).
+Full file rewrites (torch.save, dd) allocate all-new blocks and send the whole file.
+The key insight: use mmap-native formats and the delta efficiency holds. Rollback is
+always instant regardless — local snapshots, no network.*
 
 ---
 
