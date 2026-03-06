@@ -364,7 +364,46 @@ filesystem that understands replication natively.*
 
 ---
 
-## Slide 13: What's Next
+## Slide 13: What This Doesn't Solve (Yet)
+
+**Honest gaps — where containers and orchestrators still win**
+
+| Problem | What k8s gives you | What we'd need to build |
+|---------|-------------------|------------------------|
+| Multi-host coordination | Service discovery, DNS, etcd | Agent-to-agent gossip protocol or external registry |
+| Horizontal scaling | `replicas: 50` | 50 users? UID templating? This gets awkward fast |
+| Cross-host identity | ServiceAccount + RBAC | SPIFFE/SPIRE or cert-based agent identity — UIDs are local |
+| Secret rotation | Secrets + CSI drivers | Vault integration or kernel keyring per agent UID |
+| GPU sharing | Device plugin + MIG | Manual MIG/time-slice config outside systemd |
+| Concurrent memory edits | N/A (stateless pods) | btrfs send/receive is eventually consistent — no conflict resolution if two agents modify the same memory on different hosts |
+| Admission control | OPA / Gatekeeper | Policy enforcement in agent-shell or PAM modules |
+| Observability at scale | Sidecar + aggregator | journald is per-host; need centralized collection for 100+ hosts |
+
+*Speaker notes: Be honest about these. The agent-as-user model works well for
+single-host or small-cluster deployments where agents are distinct roles (build,
+review, deploy). It breaks down when you need 50 identical replicas of the same
+agent — that's where k8s pod scaling genuinely wins. The memory consistency
+problem is real: if agent-build on host A and agent-build on host B both modify
+session memory, btrfs snapshots don't merge — you get last-snapshot-wins. You'd
+need a CRDT layer or explicit locking for shared mutable state.*
+
+**Other edge cases to think about:**
+
+- Rollback granularity: btrfs snapshot rollback is all-or-nothing per subvolume.
+  Can't undo one bad decision without undoing everything since the last snapshot.
+- Agent dependency chains: systemd ordering is static. If agent-deploy needs to
+  wait for agent-build to finish a *specific task* (not just be running), you need
+  dynamic workflow coordination — which is exactly what Airflow/Step Functions do.
+- Resource contention: cgroups prevent one agent from starving others, but they
+  don't help agents *negotiate* for resources. A training agent that needs burst
+  GPU can't ask a review agent to yield — it just hits its limit.
+- Filesystem as API: btrfs subvolumes are great for bulk state, but agents
+  communicating via filesystem writes is slow compared to gRPC/sockets. The
+  event socket helps, but complex multi-agent workflows may outgrow it.
+
+---
+
+## Slide 14: Next Steps
 
 - Prototype: cloud-init module for agent provisioning (PR to cloud-init upstream)
 - Agent-shell: custom login shell that drops into agent runtime
@@ -372,16 +411,21 @@ filesystem that understands replication natively.*
 - btrfs-based agent migration: snapshot entire agent home, send to new host
 - Event-driven microVM spawner: systemd + Firecracker integration
 - Audit framework: structured logging + btrfs diff for task review
+- Conflict resolution: CRDT-based session memory merge for multi-host agents
+- Agent identity: SPIFFE integration for cross-host authentication
 
 **The agent is the new process. The user account is the new container.
 cloud-init is the new orchestrator. btrfs is the new registry.**
 
+*But we're not throwing away orchestration — we're moving it inside the agent.*
+
 ---
 
-## Slide 14: Q&A
+## Slide 15: Q&A
 
 **Resources:**
 - Part 1 (btrfs replication): github.com/davdunc/btrfs-replication-test
 - cloud-init: github.com/canonical/cloud-init
 - Firecracker: github.com/firecracker-microvm/firecracker
 - AgentCore: aws.amazon.com/agentcore
+- SPIFFE (agent identity): spiffe.io
