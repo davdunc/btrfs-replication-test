@@ -1,0 +1,26 @@
+---
+title: "Slide 15: Event-Driven Activation & microVM Decision"
+---
+flowchart TB
+    EVT["Event arrives<br/>(systemd .socket)"] --> WAKE["Socket activation<br/>spawns agent service"]
+
+    WAKE --> EVAL{"Agent evaluates task"}
+
+    EVAL -->|"Trusted + lightweight"| LOCAL["On-host process<br/>⚡ 0ms overhead"]
+    EVAL -->|"Untrusted / isolated"| MVM["Firecracker microVM<br/>⚡ 125ms boot<br/>~30MB overhead"]
+    EVAL -->|"Heavy compute<br/>(training)"| CLOUD["EC2 Spot instance<br/>btrfs send model →<br/>run training →<br/>btrfs send results ←"]
+
+    LOCAL --> RESULT["Results → ~/work/"]
+    MVM --> RESULT
+    CLOUD --> RESULT
+
+    RESULT --> REVIEW{"Agent reviews<br/>output"}
+    REVIEW -->|"Accept"| MERGE["Merge into<br/>agent subvolume"]
+    REVIEW -->|"Reject"| DISCARD["Discard scratch<br/>subvolume"]
+
+    style EVT fill:#553c9a,stroke:#b794f4,color:#fff
+    style EVAL fill:#2d3748,stroke:#4299e1,color:#fff
+    style LOCAL fill:#48bb78,stroke:#38a169,color:#fff
+    style MVM fill:#ed8936,stroke:#dd6b20,color:#fff
+    style CLOUD fill:#4299e1,stroke:#2b6cb0,color:#fff
+    style REVIEW fill:#2d3748,stroke:#4299e1,color:#fff

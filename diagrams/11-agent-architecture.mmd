@@ -1,0 +1,49 @@
+---
+title: "Slide 11: Agent-as-User Architecture"
+---
+flowchart TB
+    subgraph Host["Linux Host"]
+        direction TB
+
+        subgraph Agents["Agent Users (UIDs)"]
+            direction LR
+            subgraph A1["agent-build"]
+                A1M["~/memory"]
+                A1T["~/tools"]
+                A1W["~/work"]
+            end
+            subgraph A2["agent-review"]
+                A2M["~/memory"]
+                A2T["~/tools"]
+                A2W["~/work"]
+            end
+            subgraph A3["agent-deploy"]
+                A3M["~/memory"]
+                A3T["~/tools"]
+                A3W["~/work"]
+            end
+        end
+
+        EB["Event Bus<br/>systemd socket activation"]
+
+        A1 --- EB
+        A2 --- EB
+        A3 --- EB
+
+        subgraph Services["Backing Services"]
+            direction LR
+            MEM["Extended Memory<br/>AgentCore / MemoriesDB"]
+            MOD["Model Store<br/>btrfs subvolumes"]
+            AUD["Audit Log<br/>journald + actions.log"]
+        end
+
+        EB --- Services
+    end
+
+    style Host fill:#1a202c,stroke:#4a5568,color:#fff
+    style Agents fill:#2d3748,stroke:#4299e1,color:#fff
+    style A1 fill:#2c5282,stroke:#63b3ed,color:#fff
+    style A2 fill:#276749,stroke:#68d391,color:#fff
+    style A3 fill:#744210,stroke:#ed8936,color:#fff
+    style Services fill:#2d3748,stroke:#9f7aea,color:#fff
+    style EB fill:#553c9a,stroke:#b794f4,color:#fff

@@ -1,0 +1,25 @@
+---
+title: "Slide 4: Replication Architecture"
+---
+flowchart LR
+    subgraph Source["TRAINING NODE (p5.48xlarge)"]
+        direction TB
+        M["/data/model"] --> S1["/data/model-snap-v1<br/>🔒 read-only"]
+        M --> S2["/data/model-snap-v2<br/>🔒 read-only"]
+    end
+
+    S2 -- "btrfs send --proto 2<br/>incremental delta" --> TEE((tee))
+
+    TEE -- "SSH pipe" --> T1
+    TEE -- "SSH pipe" --> T2
+    TEE -- "SSH pipe" --> T3
+
+    subgraph Targets["INFERENCE FLEET"]
+        T1["Inference Node 1<br/>/data/model-snap-v2"]
+        T2["Inference Node 2<br/>/data/model-snap-v2"]
+        T3["Inference Node N<br/>/data/model-snap-v2"]
+    end
+
+    style Source fill:#2d3748,stroke:#4299e1,color:#fff
+    style Targets fill:#2d3748,stroke:#48bb78,color:#fff
+    style TEE fill:#ed8936,stroke:#dd6b20,color:#fff

@@ -1,0 +1,15 @@
+---
+title: "Slide 12: cloud-init Provisioning Flow"
+---
+flowchart LR
+    CI["cloud-init<br/>#cloud-config"] --> U["Create system users<br/>agent-build, agent-review"]
+    U --> BV["Create btrfs subvolumes<br/>/data/agents/agent-*"]
+    BV --> BD["Bind-mount as<br/>home directories"]
+    BD --> DIR["Create ~/memory<br/>~/tools ~/work"]
+    DIR --> TMP["Mount tmpfs<br/>~/memory/working"]
+    TMP --> LOG["Set append-only<br/>~/work/actions.log"]
+    LOG --> SD["Enable systemd<br/>agent@.service"]
+    SD --> RUN["✅ Agents running"]
+
+    style CI fill:#ed8936,stroke:#dd6b20,color:#fff
+    style RUN fill:#48bb78,stroke:#38a169,color:#fff

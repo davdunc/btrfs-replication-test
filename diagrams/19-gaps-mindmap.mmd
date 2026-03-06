@@ -1,0 +1,26 @@
+---
+title: "Slide 19: What This Doesn't Solve"
+---
+mindmap
+  root((What This<br/>Doesn't Solve))
+    Multi-Host
+      Service discovery
+      Cross-host DNS
+      Agent gossip protocol needed
+    Scaling
+      replicas: 50 is trivial in k8s
+      UID templating gets awkward
+    Identity
+      UIDs are local
+      Need SPIFFE/SPIRE
+    State Conflicts
+      btrfs send is eventually consistent
+      No merge strategy
+      Last snapshot wins
+    Observability
+      journald is per-host
+      Need centralized aggregation
+    Fine-Grained Control
+      No admission control
+      No resource negotiation
+      Rollback is all-or-nothing

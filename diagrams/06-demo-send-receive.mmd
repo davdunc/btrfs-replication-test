@@ -1,0 +1,35 @@
+---
+title: "Slides 6-7: Full & Incremental Send"
+---
+sequenceDiagram
+    participant S as Source /data
+    participant Snap as Snapshots
+    participant Net as Network (SSH)
+    participant T as Target /data
+
+    Note over S: Step 1: Write model data
+    S->>S: dd → /data/model/weights.bin (100MB)
+    S->>S: echo → /data/model/config.json
+
+    Note over S,Snap: Step 2: Read-only snapshot
+    S->>Snap: btrfs subvolume snapshot -r<br/>model → model-snap-v1
+
+    Note over Snap,T: Step 3: Full send
+    Snap->>Net: btrfs send --proto 2 --compressed-data<br/>model-snap-v1
+    Net->>T: btrfs receive /data/
+    Note over T: ✅ model-snap-v1 (read-only)
+
+    Note over S: Step 4: Update model (fine-tuning)
+    S->>S: dd → /data/model/weights.bin (changed)
+    S->>S: echo → config.json v2.0
+
+    Note over S,Snap: Step 5: Second snapshot
+    S->>Snap: btrfs subvolume snapshot -r<br/>model → model-snap-v2
+
+    Note over Snap,T: Step 6: Incremental send (delta only)
+    Snap->>Net: btrfs send -p snap-v1 snap-v2<br/>⚡ only changed blocks
+    Net->>T: btrfs receive /data/
+    Note over T: ✅ model-snap-v2 (read-only)
+
+    Note over T: Create writable copy for serving
+    T->>T: btrfs subvolume snapshot<br/>model-snap-v2 → model (rw)

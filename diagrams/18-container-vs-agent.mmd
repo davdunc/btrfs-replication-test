@@ -1,0 +1,24 @@
+---
+title: "Slide 18: Container Model vs Agent-as-User Model"
+---
+flowchart LR
+    subgraph Container["Container Model (6 steps)"]
+        direction TB
+        DF["Dockerfile"] --> IMG["Image Build"]
+        IMG --> REG["Registry Push"]
+        REG --> PULL["Registry Pull"]
+        PULL --> CRT["Container Runtime"]
+        CRT --> K8S["K8s Orchestrator"]
+        K8S --> POD["Pod"]
+    end
+
+    subgraph AgentModel["Agent-as-User Model (4 steps)"]
+        direction TB
+        CC["cloud-config"] --> CINIT["cloud-init"]
+        CINIT --> USR["Linux User +<br/>btrfs subvol"]
+        USR --> SYS["systemd service"]
+        SYS --> PROC["Process"]
+    end
+
+    style Container fill:#e53e3e,stroke:#c53030,color:#fff
+    style AgentModel fill:#48bb78,stroke:#38a169,color:#fff
