@@ -1,9 +1,16 @@
 ---
-title: "Slide 11: Agent-as-User Architecture"
+title: "Slide 11: Agent-as-User Architecture (with MCP config)"
 ---
 flowchart TB
     subgraph Host["Linux Host"]
         direction TB
+
+        subgraph SysConfig["/etc/agent-config/ (root-owned)"]
+            direction LR
+            C1["agent-build/<br/>mcp.json"]
+            C2["agent-review/<br/>mcp.json"]
+            C3["agent-deploy/<br/>mcp.json"]
+        end
 
         subgraph Agents["Agent Users (UIDs)"]
             direction LR
@@ -24,6 +31,10 @@ flowchart TB
             end
         end
 
+        C1 -.->|"read-only"| A1
+        C2 -.->|"read-only"| A2
+        C3 -.->|"read-only"| A3
+
         EB["Event Bus<br/>systemd socket activation"]
 
         A1 --- EB
@@ -32,15 +43,16 @@ flowchart TB
 
         subgraph Services["Backing Services"]
             direction LR
-            MEM["Extended Memory<br/>AgentCore / MemoriesDB"]
+            MEM["Extended Memory<br/>AgentCore"]
             MOD["Model Store<br/>btrfs subvolumes"]
-            AUD["Audit Log<br/>journald + actions.log"]
+            AUD["Audit Log<br/>journald"]
         end
 
         EB --- Services
     end
 
     style Host fill:#1a202c,stroke:#4a5568,color:#fff
+    style SysConfig fill:#744210,stroke:#ed8936,color:#fff
     style Agents fill:#2d3748,stroke:#4299e1,color:#fff
     style A1 fill:#2c5282,stroke:#63b3ed,color:#fff
     style A2 fill:#276749,stroke:#68d391,color:#fff

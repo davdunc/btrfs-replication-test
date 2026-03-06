@@ -1,0 +1,40 @@
+---
+title: "Slide 14: Privilege Separation — OpenSSH Model for Agents"
+---
+flowchart TB
+    subgraph Privsep["Privilege Separation"]
+        direction TB
+
+        subgraph Monitor["agent-monitor (root)"]
+            direction TB
+            CFG["Reads /etc/agent-config/<br/>agent-build/mcp.json"]
+            POLICY["Validates requests<br/>against MCP policy"]
+            EXEC["Executes privileged ops<br/>(mount, snapshot, network)"]
+            CFG --> POLICY --> EXEC
+        end
+
+        subgraph Child["agent-runtime (agent-build UID)"]
+            direction TB
+            WORK["Processes tasks"]
+            MEM["Reads/writes ~/memory"]
+            TOOLS["Uses MCP tools<br/>(sandboxed)"]
+        end
+
+        Child -->|"Request: snapshot /data/model"| Monitor
+        Monitor -->|"✅ Allowed by mcp.json"| Child
+
+        Child -->|"Request: read /etc/shadow"| Monitor
+        Monitor -->|"❌ Denied by mcp.json"| Child
+    end
+
+    subgraph Config["/etc/agent-config/agent-build/"]
+        direction TB
+        MCP["mcp.json<br/>root:agents 0644<br/>Agent reads, cannot write"]
+    end
+
+    Config -.->|"read-only bind mount"| Monitor
+
+    style Monitor fill:#c53030,stroke:#e53e3e,color:#fff
+    style Child fill:#2c5282,stroke:#63b3ed,color:#fff
+    style Config fill:#744210,stroke:#ed8936,color:#fff
+    style Privsep fill:#1a202c,stroke:#4a5568,color:#fff

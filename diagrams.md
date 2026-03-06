@@ -95,12 +95,19 @@ quadrantChart
 
 ---
 
-## Slide 11: Agent-as-User Architecture
+## Slide 11: Agent-as-User Architecture (with MCP config)
 
 ```mermaid
 flowchart TB
     subgraph Host["Linux Host"]
         direction TB
+
+        subgraph SysConfig["/etc/agent-config/ (root-owned)"]
+            direction LR
+            C1["agent-build/<br/>mcp.json"]
+            C2["agent-review/<br/>mcp.json"]
+            C3["agent-deploy/<br/>mcp.json"]
+        end
 
         subgraph Agents["Agent Users (UIDs)"]
             direction LR
@@ -121,6 +128,10 @@ flowchart TB
             end
         end
 
+        C1 -.->|"read-only"| A1
+        C2 -.->|"read-only"| A2
+        C3 -.->|"read-only"| A3
+
         EB["Event Bus<br/>systemd socket activation"]
 
         A1 --- EB
@@ -129,15 +140,16 @@ flowchart TB
 
         subgraph Services["Backing Services"]
             direction LR
-            MEM["Extended Memory<br/>AgentCore / MemoriesDB"]
+            MEM["Extended Memory<br/>AgentCore"]
             MOD["Model Store<br/>btrfs subvolumes"]
-            AUD["Audit Log<br/>journald + actions.log"]
+            AUD["Audit Log<br/>journald"]
         end
 
         EB --- Services
     end
 
     style Host fill:#1a202c,stroke:#4a5568,color:#fff
+    style SysConfig fill:#744210,stroke:#ed8936,color:#fff
     style Agents fill:#2d3748,stroke:#4299e1,color:#fff
     style A1 fill:#2c5282,stroke:#63b3ed,color:#fff
     style A2 fill:#276749,stroke:#68d391,color:#fff
@@ -148,45 +160,120 @@ flowchart TB
 
 ---
 
-## Slide 12: cloud-init Provisioning Flow
+## Slide 14: Privilege Separation & MCP Config
+
+```mermaid
+flowchart TB
+    subgraph Privsep["Privilege Separation"]
+        direction TB
+
+        subgraph Monitor["agent-monitor (root)"]
+            direction TB
+            CFG["Reads /etc/agent-config/<br/>agent-build/mcp.json"]
+            POLICY["Validates requests<br/>against MCP policy"]
+            EXEC["Executes privileged ops<br/>(mount, snapshot, network)"]
+            CFG --> POLICY --> EXEC
+        end
+
+        subgraph Child["agent-runtime (agent-build UID)"]
+            direction TB
+            WORK["Processes tasks"]
+            MEM["Reads/writes ~/memory"]
+            TOOLS["Uses MCP tools<br/>(sandboxed)"]
+        end
+
+        Child -->|"Request: snapshot /data/model"| Monitor
+        Monitor -->|"✅ Allowed by mcp.json"| Child
+
+        Child -->|"Request: read /etc/shadow"| Monitor
+        Monitor -->|"❌ Denied by mcp.json"| Child
+    end
+
+    subgraph Config["/etc/agent-config/agent-build/"]
+        direction TB
+        MCP["mcp.json<br/>root:agents 0644<br/>Agent reads, cannot write"]
+    end
+
+    Config -.->|"read-only bind mount"| Monitor
+
+    style Monitor fill:#c53030,stroke:#e53e3e,color:#fff
+    style Child fill:#2c5282,stroke:#63b3ed,color:#fff
+    style Config fill:#744210,stroke:#ed8936,color:#fff
+    style Privsep fill:#1a202c,stroke:#4a5568,color:#fff
+```
+
+---
+
+## Slide 14b: OpenSSH vs Agent Privsep Comparison
+
+```mermaid
+flowchart LR
+    subgraph SSH["OpenSSH Privsep"]
+        direction TB
+        SSHD_R["sshd (root)<br/>reads sshd_config"]
+        SSHD_U["sshd (sshd user)<br/>handles connection"]
+        SHELL["shell (user)<br/>user session"]
+        SSHD_R --> SSHD_U --> SHELL
+    end
+
+    subgraph Agent["Agent Privsep"]
+        direction TB
+        MON["agent-monitor (root)<br/>reads mcp.json"]
+        RT["agent-runtime (agent UID)<br/>processes tasks"]
+        MCP_T["MCP tools (sandboxed)<br/>filesystem, btrfs, etc."]
+        MON --> RT --> MCP_T
+    end
+
+    style SSH fill:#2d3748,stroke:#4299e1,color:#fff
+    style Agent fill:#2d3748,stroke:#48bb78,color:#fff
+```
+
+---
+
+## Slide 12: cloud-init Provisioning Flow (updated with MCP config)
 
 ```mermaid
 flowchart LR
     CI["cloud-init<br/>#cloud-config"] --> U["Create system users<br/>agent-build, agent-review"]
     U --> BV["Create btrfs subvolumes<br/>/data/agents/agent-*"]
     BV --> BD["Bind-mount as<br/>home directories"]
-    BD --> DIR["Create ~/memory<br/>~/tools ~/work"]
+    BD --> MCP["Write MCP config<br/>/etc/agent-config/*/mcp.json<br/>root:agents 0644"]
+    MCP --> DIR["Create ~/memory<br/>~/tools ~/work"]
     DIR --> TMP["Mount tmpfs<br/>~/memory/working"]
     TMP --> LOG["Set append-only<br/>~/work/actions.log"]
     LOG --> SD["Enable systemd<br/>agent@.service"]
     SD --> RUN["✅ Agents running"]
 
     style CI fill:#ed8936,stroke:#dd6b20,color:#fff
+    style MCP fill:#744210,stroke:#ed8936,color:#fff
     style RUN fill:#48bb78,stroke:#38a169,color:#fff
 ```
 
 ---
 
-## Slide 13: systemd Sandboxing Layers
+## Slide 13: systemd Sandboxing (updated)
 
 ```mermaid
 flowchart TB
     subgraph Systemd["systemd agent@.service"]
         direction TB
-        CG["CPUQuota=200%<br/>MemoryMax=8G<br/>IOWeight=100"]
+        CG["CPUQuota=200%<br/>MemoryMax=8G"]
         NS["ProtectSystem=strict<br/>ProtectHome=tmpfs<br/>PrivateTmp=true"]
-        SEC["NoNewPrivileges=true<br/>User=agent-%i<br/>Group=agents"]
-        BIND["BindPaths=/home/agent-%i"]
-        LIFE["Restart=always<br/>RestartSec=5<br/>Type=notify"]
+        SEC["NoNewPrivileges=true<br/>User=agent-%i"]
+        BIND["BindPaths=/home/agent-%i<br/>BindReadOnlyPaths=<br/>/etc/agent-config/agent-%i"]
+        LIFE["Restart=always<br/>Type=notify"]
     end
 
-    CG --> |"Resource Limits"| PROC["Agent Process"]
-    NS --> |"Filesystem Sandbox"| PROC
-    SEC --> |"Privilege Restriction"| PROC
-    BIND --> |"Home Access"| PROC
-    LIFE --> |"Lifecycle"| PROC
+    CG --> |"Resource Limits"| MON["agent-monitor (root)"]
+    NS --> |"Filesystem Sandbox"| MON
+    SEC --> |"Privilege Restriction"| MON
+    BIND --> |"Home + Config Access"| MON
+    LIFE --> |"Lifecycle"| MON
+
+    MON --> |"fork + drop privs"| PROC["agent-runtime<br/>(agent UID)"]
 
     style Systemd fill:#2d3748,stroke:#4299e1,color:#fff
+    style MON fill:#c53030,stroke:#e53e3e,color:#fff
     style PROC fill:#48bb78,stroke:#38a169,color:#fff
 ```
 

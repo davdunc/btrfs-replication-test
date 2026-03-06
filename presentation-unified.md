@@ -1,7 +1,7 @@
 # BTRFS, Agents, and the Post-Container Stack
 ## Unified Presentation — 60 Minutes
 
-**Total: 21 slides | 55 min content + 5 min Q&A**
+**Total: 22 slides | 57 min content + 3 min Q&A**
 
 | Slide | Topic | Time | Cumulative |
 |-------|-------|------|------------|
@@ -19,14 +19,15 @@
 | 11 | Agent-as-User Architecture | 3 min | 0:32 |
 | 12 | cloud-init: The Agent Provisioner | 3 min | 0:35 |
 | 13 | systemd: Lifecycle Without an Orchestrator | 3 min | 0:38 |
-| 14 | Memory Architecture: Three Tiers | 3 min | 0:41 |
-| 15 | Event-Driven Activation & microVMs | 3 min | 0:44 |
-| 16 | Transparency & Peer Review | 2 min | 0:46 |
-| 17 | The Bridge: btrfs as Universal Replication | 3 min | 0:49 |
-| 18 | Why Not Containers? | 3 min | 0:52 |
-| 19 | What This Doesn't Solve (Yet) | 3 min | 0:55 |
-| 20 | Next Steps | 2 min | 0:57 |
-| 21 | Q&A | 3 min | 1:00 |
+| 14 | Privilege Separation & MCP Config | 3 min | 0:41 |
+| 15 | Memory Architecture: Three Tiers | 3 min | 0:44 |
+| 16 | Event-Driven Activation & microVMs | 3 min | 0:47 |
+| 17 | Transparency & Peer Review | 2 min | 0:49 |
+| 18 | The Bridge: btrfs as Universal Replication | 3 min | 0:52 |
+| 19 | Why Not Containers? | 2 min | 0:54 |
+| 20 | What This Doesn't Solve (Yet) | 3 min | 0:57 |
+| 21 | Next Steps | 2 min | 0:59 |
+| 22 | Q&A | 1 min | 1:00 |
 
 ---
 
@@ -263,6 +264,11 @@ Linux users?**
 ┌─────────────────────────────────────────────────────────┐
 │                    Linux Host / microVM                  │
 │                                                         │
+│  /etc/agent-config/          ← system-managed, root-owned│
+│  ├── agent-build/mcp.json      (agents can read,        │
+│  ├── agent-review/mcp.json      not write)              │
+│  └── agent-deploy/mcp.json                              │
+│                                                         │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
 │  │ agent-01 │  │ agent-02 │  │ agent-03 │  ← UIDs      │
 │  │ (build)  │  │ (review) │  │ (deploy) │              │
@@ -290,9 +296,10 @@ Linux users?**
 ```
 
 - Each agent = Linux system user
-- Home directory = btrfs subvolume
+- Home directory = btrfs subvolume (agent-writable state)
+- MCP config at `/etc/agent-config/` (root-owned, agent-readable)
+- Agents cannot modify their own tool permissions — like sshd_config
 - Event bus = systemd socket activation
-- No container runtime, no orchestrator
 
 ---
 
@@ -314,6 +321,11 @@ runcmd:
   - chown -R agent-build:agents /data/agents/agent-build
   - mount --bind /data/agents/agent-build /home/agent-build
 
+  # MCP config — root-owned, agent-readable (not writable)
+  - mkdir -p /etc/agent-config/agent-build
+  - install -m 0644 -o root -g agents \
+      /dev/stdin /etc/agent-config/agent-build/mcp.json
+
   # Append-only audit log
   - touch /home/agent-build/work/actions.log
   - chattr +a /home/agent-build/work/actions.log
@@ -321,7 +333,31 @@ runcmd:
   - systemctl enable --now agent@build
 ```
 
-No Dockerfile. No Helm chart. No kubectl. Just users, directories, and systemd.
+```json
+// /etc/agent-config/agent-build/mcp.json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "mcp-fs",
+      "args": ["--root", "/home/agent-build"],
+      "env": {}
+    },
+    "btrfs": {
+      "command": "mcp-btrfs",
+      "args": ["--subvolume", "/data/agents/agent-build"]
+    }
+  },
+  "permissions": {
+    "allowedPaths": ["/home/agent-build", "/data/model"],
+    "deniedPaths": ["/etc", "/root", "/home/agent-*"],
+    "allowedCommands": ["btrfs subvolume snapshot", "btrfs send"]
+  }
+}
+```
+
+- MCP config is the agent's capability manifest — what tools it can use
+- Root-owned, group-readable: agents read their config but can't escalate
+- Same pattern as `/etc/ssh/sshd_config` — system policy, not user preference
 
 ---
 
@@ -334,7 +370,7 @@ Type=notify
 User=agent-%i
 Group=agents
 WorkingDirectory=/home/agent-%i
-ExecStart=/home/agent-%i/tools/agent-runtime
+ExecStart=/usr/libexec/agent-monitor --config /etc/agent-config/agent-%i/mcp.json
 Restart=always
 
 # Resource isolation — the "container" is a cgroup
@@ -344,17 +380,81 @@ MemoryMax=8G
 # Security — the "sandbox" is systemd
 ProtectSystem=strict
 ProtectHome=tmpfs
+BindReadOnlyPaths=/etc/agent-config/agent-%i
 BindPaths=/home/agent-%i
 PrivateTmp=true
 NoNewPrivileges=true
 ```
 
-systemd gives you: restart policies, resource limits, health checks (sd_notify),
-dependency ordering, sandboxing. It's been in the kernel for a decade.
+- `BindReadOnlyPaths` for MCP config — agent can read, not modify
+- `BindPaths` for home — agent's writable workspace
+- `agent-monitor` is the privileged parent (see next slide)
 
 ---
 
-## Slide 14: Memory Architecture — Three Tiers (3 min)
+## Slide 14: Privilege Separation & MCP Config (3 min)
+
+**The OpenSSH model, applied to agents**
+
+```
+┌─────────────────────────────────────────────────┐
+│ OpenSSH privsep                                 │
+│                                                 │
+│  sshd (root)          ← privileged monitor      │
+│    └─ sshd (sshd)     ← unprivileged child      │
+│        └─ shell (user) ← user session            │
+│                                                 │
+│ Agent privsep                                   │
+│                                                 │
+│  agent-monitor (root)  ← reads /etc/agent-config│
+│    └─ agent-runtime    ← drops to agent UID     │
+│        (agent-build)     chrooted to ~/          │
+│                          MCP tools sandboxed     │
+└─────────────────────────────────────────────────┘
+```
+
+**How it works:**
+
+1. `agent-monitor` starts as root, reads `/etc/agent-config/agent-build/mcp.json`
+2. Forks an unprivileged child, drops to `agent-build` UID
+3. Child runs `agent-runtime` in a restricted namespace
+4. When the agent needs a privileged operation (mount, snapshot, network),
+   it requests it from the monitor over a Unix socket
+5. Monitor validates the request against MCP config policy, executes or denies
+
+```
+agent-runtime (agent-build)                agent-monitor (root)
+        │                                         │
+        ├── "snapshot /data/model" ──────────────▶ │
+        │                                  check mcp.json:
+        │                                  allowedCommands ✅
+        │                                  ◀── execute + return ──┤
+        │                                         │
+        ├── "read /etc/shadow" ──────────────────▶ │
+        │                                  check mcp.json:
+        │                                  deniedPaths ❌
+        │                                  ◀── DENIED ───────────┤
+```
+
+**Why `/etc/agent-config/` instead of `~/.config/`:**
+
+- Agents cannot grant themselves new capabilities
+- MCP config is system policy, not user preference
+- Changing agent permissions requires root — same as `sshd_config`
+- cloud-init provisions it at deploy time; updates require a new deployment
+- Audit: `ls -la /etc/agent-config/` shows exactly what each agent can do
+
+*Speaker notes: This is the critical security boundary. In the container model,
+the container image defines what's inside. Here, the MCP config defines what
+the agent can reach. But unlike a container image that the developer builds,
+the MCP config is system-administered. The agent can't docker-exec its way
+to more permissions. It's the same principle as OpenSSH: the sshd process
+that handles your connection can't modify sshd_config to give itself more
+access. The privileged monitor is the gatekeeper.*
+
+---
+
+## Slide 15: Memory Architecture — Three Tiers (3 min)
 
 | Tier | Backing | Lifetime | Replication |
 |------|---------|----------|-------------|
@@ -375,7 +475,7 @@ dependency ordering, sandboxing. It's been in the kernel for a decade.
 
 ---
 
-## Slide 15: Event-Driven Activation & microVMs (3 min)
+## Slide 16: Event-Driven Activation & microVMs (3 min)
 
 ```
 Agent receives task
@@ -402,7 +502,7 @@ Agent receives task
 
 ---
 
-## Slide 16: Transparency & Peer Review (2 min)
+## Slide 17: Transparency & Peer Review (2 min)
 
 ```
 ~/work/
@@ -421,7 +521,7 @@ Agent receives task
 
 ---
 
-## Slide 17: The Bridge — btrfs as Universal Replication (3 min)
+## Slide 18: The Bridge — btrfs as Universal Replication (3 min)
 
 **One primitive for everything**
 
@@ -447,7 +547,7 @@ agent migration. No registry. No image layers. Just subvolumes and deltas.
 
 ---
 
-## Slide 18: Why Not Containers? (3 min)
+## Slide 19: Why Not Containers? (3 min)
 
 | Concern | Container/K8s | Agent-as-user |
 |---------|--------------|---------------|
@@ -468,7 +568,7 @@ to something that can manage itself.*
 
 ---
 
-## Slide 19: What This Doesn't Solve (Yet) (3 min)
+## Slide 20: What This Doesn't Solve (Yet) (3 min)
 
 | Problem | K8s gives you | We'd need to build |
 |---------|--------------|-------------------|
@@ -489,7 +589,7 @@ to something that can manage itself.*
 
 ---
 
-## Slide 20: Next Steps (2 min)
+## Slide 21: Next Steps (2 min)
 
 **Building:**
 - cloud-init module for agent provisioning (PR to cloud-init upstream)
@@ -509,7 +609,7 @@ cloud-init is the new orchestrator. btrfs is the new registry.**
 
 ---
 
-## Slide 21: Q&A (3 min)
+## Slide 22: Q&A (3 min)
 
 **Resources:**
 - Repository: github.com/davdunc/btrfs-replication-test

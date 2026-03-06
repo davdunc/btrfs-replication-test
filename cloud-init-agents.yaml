@@ -76,13 +76,14 @@ write_files:
 
       [Service]
       Type=notify
-      User=agent-%i
+      User=root
       Group=agents
       WorkingDirectory=/home/agent-%i
       Environment=AGENT_NAME=%i
-      Environment=AGENT_MEMORY_DIR=/home/agent-%i/memory
-      Environment=AGENT_WORK_DIR=/home/agent-%i/work
-      ExecStart=/home/agent-%i/tools/agent-runtime
+      ExecStart=/usr/libexec/agent-monitor \
+        --config /etc/agent-config/agent-%i/mcp.json \
+        --user agent-%i \
+        --work-dir /home/agent-%i
       Restart=always
       RestartSec=5
 
@@ -94,6 +95,7 @@ write_files:
       # Systemd sandboxing
       ProtectSystem=strict
       ProtectHome=tmpfs
+      BindReadOnlyPaths=/etc/agent-config/agent-%i
       BindPaths=/home/agent-%i
       PrivateTmp=true
       NoNewPrivileges=true
@@ -114,6 +116,77 @@ write_files:
 
       [Install]
       WantedBy=sockets.target
+
+  # --- MCP configurations (root-owned, agent-readable) ---
+  - path: /etc/agent-config/agent-build/mcp.json
+    owner: root:agents
+    permissions: '0644'
+    content: |
+      {
+        "mcpServers": {
+          "filesystem": {
+            "command": "mcp-fs",
+            "args": ["--root", "/home/agent-build"]
+          },
+          "btrfs": {
+            "command": "mcp-btrfs",
+            "args": ["--subvolume", "/data/agents/agent-build"]
+          },
+          "build-tools": {
+            "command": "mcp-build",
+            "args": ["--lang", "python,rust"]
+          }
+        },
+        "permissions": {
+          "allowedPaths": ["/home/agent-build", "/data/model"],
+          "deniedPaths": ["/etc", "/root", "/home/agent-review", "/home/agent-deploy"],
+          "allowedCommands": ["btrfs subvolume snapshot", "btrfs send", "make", "cargo"]
+        }
+      }
+
+  - path: /etc/agent-config/agent-review/mcp.json
+    owner: root:agents
+    permissions: '0644'
+    content: |
+      {
+        "mcpServers": {
+          "filesystem": {
+            "command": "mcp-fs",
+            "args": ["--root", "/home/agent-review", "--read-also", "/home/agent-build/work"]
+          },
+          "code-analysis": {
+            "command": "mcp-lint",
+            "args": ["--strict"]
+          }
+        },
+        "permissions": {
+          "allowedPaths": ["/home/agent-review", "/home/agent-build/work"],
+          "deniedPaths": ["/etc", "/root", "/home/agent-deploy"],
+          "allowedCommands": ["git diff", "git log"]
+        }
+      }
+
+  - path: /etc/agent-config/agent-deploy/mcp.json
+    owner: root:agents
+    permissions: '0644'
+    content: |
+      {
+        "mcpServers": {
+          "filesystem": {
+            "command": "mcp-fs",
+            "args": ["--root", "/home/agent-deploy"]
+          },
+          "btrfs": {
+            "command": "mcp-btrfs",
+            "args": ["--subvolume", "/data/agents/agent-deploy", "--model-path", "/data/model"]
+          }
+        },
+        "permissions": {
+          "allowedPaths": ["/home/agent-deploy", "/data/model"],
+          "deniedPaths": ["/etc", "/root"],
+          "allowedCommands": ["btrfs subvolume snapshot", "btrfs send", "btrfs receive", "systemctl restart"]
+        }
+      }
 
   - path: /usr/bin/agent-shell
     permissions: '0755'
