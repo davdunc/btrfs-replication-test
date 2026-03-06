@@ -17,6 +17,8 @@
   .reveal th { background: #2d3748; color: #63b3ed; }
   .reveal td { background: #1a202c; }
   .reveal .mermaid { font-size: 0.7em; }
+  .reveal .mermaid svg { max-height: 350px; }
+  .reveal .slides section { display: flex !important; flex-direction: column; justify-content: flex-start; padding-top: 20px; }
   .reveal .slide-number { font-size: 14px; }
   .reveal ul { font-size: 0.85em; }
   .reveal li { margin-bottom: 0.3em; }
@@ -246,7 +248,7 @@ Agents cannot grant themselves new capabilities. MCP config is <strong>system po
 <!-- 11: Memory + Bridge (3 min) -->
 <section>
 <h2>Memory & Universal Replication</h2>
-<div class="mermaid" style="max-height:400px">
+<div class="mermaid" style="height:350px">
 flowchart LR
     RT["Agent Runtime"] <--> W["Working<br/>tmpfs — Minutes"]
     RT <--> S["Session<br/>btrfs subvol — Days"]
