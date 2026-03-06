@@ -17,6 +17,8 @@
   .reveal th { background: #2d3748; color: #63b3ed; }
   .reveal td { background: #1a202c; }
   .reveal .mermaid { font-size: 0.7em; }
+  .reveal .mermaid svg { max-height: 350px; }
+  .reveal .slides section { display: flex !important; flex-direction: column; justify-content: flex-start; padding-top: 20px; }
   .reveal .slide-number { font-size: 14px; }
   .part-divider { color: #ed8936 !important; }
   .reveal ul { font-size: 0.85em; }
@@ -394,26 +396,13 @@ MCP config is <strong>system policy</strong>, not user preference — same as <c
 <!-- SLIDE 17: Memory -->
 <section>
 <h2>Memory Architecture: Three Tiers</h2>
-<div class="mermaid">
-flowchart TB
-    subgraph Agent["Agent Process"]
-        RT["Agent Runtime"]
-    end
-    RT <--> W
-    RT <--> S
-    RT <--> LT
-    subgraph Working["Working Memory"]
-        W["tmpfs — RAM — Minutes"]
-    end
-    subgraph Session["Session Memory"]
-        S["btrfs subvolume — Hours to Days"]
-        SS["Snapshots via btrfs send/receive"]
-    end
-    S --- SS
-    subgraph LongTerm["Long-Term Memory"]
-        LT["AgentCore / MemoriesDB — Persistent"]
-    end
-    RESTART["Agent killed / recreated"] -.->|"cleared"| W
+<div class="mermaid" style="height:350px">
+flowchart LR
+    RT["Agent Runtime"] <--> W["Working<br/>tmpfs — Minutes"]
+    RT <--> S["Session<br/>btrfs subvol — Days"]
+    RT <--> LT["Long-Term<br/>AgentCore — Persistent"]
+    S --- SS["btrfs send/receive"]
+    RESTART["Agent killed"] -.->|"cleared"| W
     RESTART -.->|"preserved"| S
     RESTART -.->|"preserved"| LT
 </div>
