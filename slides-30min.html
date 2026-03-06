@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BTRFS, Agents, and the Post-Container Stack (30 min)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+<style>
+  .reveal { font-size: 28px; }
+  .reveal h1 { font-size: 1.8em; color: #63b3ed; }
+  .reveal h2 { font-size: 1.4em; color: #63b3ed; }
+  .reveal h3 { font-size: 1.1em; color: #9f7aea; }
+  .reveal pre { font-size: 0.55em; width: 95%; }
+  .reveal code { font-size: 0.9em; }
+  .reveal table { font-size: 0.65em; margin: 0 auto; }
+  .reveal th { background: #2d3748; color: #63b3ed; }
+  .reveal td { background: #1a202c; }
+  .reveal .mermaid { font-size: 0.7em; }
+  .reveal .slide-number { font-size: 14px; }
+  .reveal ul { font-size: 0.85em; }
+  .reveal li { margin-bottom: 0.3em; }
+  .accent { color: #48bb78; }
+  .warn { color: #fc8181; }
+  .highlight { color: #ed8936; }
+  pre.ascii { font-size: 0.45em; line-height: 1.3; text-align: left; background: #1a202c; padding: 15px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- 1: Title (1 min) -->
+<section>
+<h1>BTRFS, Agents, and the<br>Post-Container Stack</h1>
+<p>Two ideas, one primitive:</p>
+<ol>
+<li>Replicate LLM models with filesystem-level deltas</li>
+<li>Deploy AI agents as Linux users, not containers</li>
+</ol>
+<p><small>github.com/davdunc/btrfs-replication-test</small></p>
+</section>
+
+<!-- 2: Problem + Insight (3 min) -->
+<section>
+<h2>The Problem & The Insight</h2>
+<ul>
+<li>70B parameter model at fp16 ≈ <span class="warn">140 GB</span></li>
+<li>Fine-tuning changes a <em>fraction</em> of the weights</li>
+<li>Redeploying to N servers = <span class="warn">N × 140 GB</span> transferred</li>
+</ul>
+<pre><code class="language-bash">btrfs send -p &lt;parent-snapshot&gt; &lt;child-snapshot&gt;</code></pre>
+<ul>
+<li>Copy-on-write tracks which <strong>blocks</strong> actually changed</li>
+<li>Send stream = only modified extents, no checksumming</li>
+<li>Receive applies delta <span class="accent">atomically</span> on target</li>
+</ul>
+</section>
+
+<!-- 3: Architecture (2 min) -->
+<section>
+<h2>Replication Architecture</h2>
+<div class="mermaid">
+flowchart LR
+    subgraph Source["TRAINING NODE (p5.48xlarge)"]
+        direction TB
+        M["/data/model"] --> S1["/data/model-snap-v1<br/>read-only"]
+        M --> S2["/data/model-snap-v2<br/>read-only"]
+    end
+    S2 -- "btrfs send --proto 2<br/>incremental delta" --> TEE((tee))
+    TEE -- "SSH pipe" --> T1
+    TEE -- "SSH pipe" --> T2
+    TEE -- "SSH pipe" --> T3
+    subgraph Targets["INFERENCE FLEET"]
+        T1["Inference Node 1"]
+        T2["Inference Node 2"]
+        T3["Inference Node N"]
+    end
+</div>
+<p>One-to-many via <code>tee</code> — single read, parallel delivery.<br>
+Snapshots are O(1). Rollback is instant.</p>
+</section>
+
+<!-- 4: Demo (3 min) -->
+<section>
+<h2>Demo: Full + Incremental Send</h2>
+<pre><code class="language-bash"># Snapshot and full send
+btrfs subvolume snapshot -r /data/model /data/model-snap-v1
+btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
+  ssh fedora@target 'sudo btrfs receive /data/'
+
+# After fine-tuning: incremental send (delta only)
+btrfs subvolume snapshot -r /data/model /data/model-snap-v2
+btrfs send --proto 2 --compressed-data \
+  -p /data/model-snap-v1 /data/model-snap-v2 | \
+  ssh fedora@target 'sudo btrfs receive /data/'</code></pre>
+<p><code>--proto 2 --compressed-data</code>: v2 stream, no decompression overhead (kernel 6.0+)<br>
+<span class="warn">⚠️ Never flip received snapshots to read-write — breaks <code>received_uuid</code></span></p>
+</section>
+
+<!-- 5: Elephant in the Room (3 min) -->
+<section>
+<h2>The Elephant in the Room</h2>
+<h3>CoW tracks <em>writes</em>, not <em>value changes</em></h3>
+<pre class="ascii">
+  torch.save(model, "weights.bin")     ← writes ALL blocks → ALL are new
+  btrfs send -p snap-v1 snap-v2       ← sees all-new blocks → sends 140GB
+
+  mmap'd tensor file, update layer 31  ← writes 2% of blocks → 2% are new
+  btrfs send -p snap-v1 snap-v2       ← sees 2% new blocks → sends ~2.8GB
+</pre>
+<table>
+<tr><th>Checkpoint pattern</th><th>Incremental send</th></tr>
+<tr><td class="warn">torch.save() / safetensors write</td><td class="warn">Full model (all blocks new)</td></tr>
+<tr><td class="warn">save_pretrained() to new file</td><td class="warn">Full model</td></tr>
+<tr><td class="accent">mmap + partial write (in-place)</td><td class="accent">Only touched blocks</td></tr>
+<tr><td class="accent">Sharded — unchanged shards</td><td class="accent">Zero bytes</td></tr>
+<tr><td class="accent">Agent session memory (append)</td><td class="accent">Only new blocks</td></tr>
+</table>
+<p class="fragment"><strong>Standard ML checkpointing defeats the delta.</strong> This is a format problem.</p>
+</section>
+
+<!-- 6: Format Fix (2 min) -->
+<section>
+<h2>Making the Delta Real</h2>
+<h3>btrfs as transport primitive + CoW-friendly format</h3>
+<ul>
+<li><strong>Flat mmap'd tensor files</strong> with stable offsets per layer</li>
+<li>Fine-tuning writes only to modified layer pages</li>
+<li>LoRA adapters: base weights never written → zero delta</li>
+<li>GGUF already supports mmap for <em>inference</em> — extend to checkpointing</li>
+</ul>
+<p class="fragment"><span class="highlight">The interesting research question:</span><br>
+Design a checkpoint format where <code>btrfs send -p</code> = semantic diff.<br>
+btrfs is the transport. The format makes it efficient.</p>
+</section>
+
+<!-- 7: Comparison (2 min) -->
+<section>
+<h2>Comparison with Alternatives</h2>
+<table>
+<tr><th>Approach</th><th>Full</th><th>Incremental</th><th>Rollback</th><th>Overhead</th></tr>
+<tr><td>S3 sync</td><td>O(model)</td><td>File-level</td><td>Re-download</td><td>Low</td></tr>
+<tr><td>rsync</td><td>O(model) checksum</td><td>Block-level</td><td>Re-sync</td><td>Medium</td></tr>
+<tr><td>Container layers</td><td>O(layer)</td><td>Layer-level</td><td>Tag swap</td><td>High</td></tr>
+<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>Block-level (CoW)*</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
+</table>
+<p>*Block-level delta requires CoW-friendly write pattern (mmap/partial/sharded).<br>
+<strong>Unconditional wins:</strong> rollback, fan-out, zero-overhead snapshots, no checksumming.</p>
+</section>
+
+<!-- Transition (30 sec) -->
+<section data-background-color="#ed8936">
+<h1 style="color:#1a202c">TRANSITION</h1>
+<p style="color:#1a202c; font-size:1.2em">btrfs as a replication primitive for model weights.<br><br>
+Now: what if we use the same primitive for <strong>everything</strong> —<br>
+agent state, memory, work products?<br><br>
+And what if the agents themselves are just <strong>Linux users</strong>?</p>
+</section>
+
+<!-- 8: Thesis (2 min) -->
+<section>
+<h2>Agents as Service Account Users</h2>
+<p><strong>Containers solved packaging. Agents don't have a packaging problem.</strong></p>
+<ul>
+<li>An agent is: runtime + model + memory + tools</li>
+<li>A Linux user provides: UID/GID, cgroups, home dir, credential scope</li>
+<li>K8s orchestrates <em>where</em> things run. Agents decide <em>what</em> to do.</li>
+</ul>
+<pre class="ascii fragment">
+2006: EC2 user-data     — shell scripts
+2010: cloud-init        — declarative config
+2015: Dockerfiles       — container packaging
+2018: Helm charts       — container orchestration
+2026: cloud-init agents — agent provisioning  ← full circle
+</pre>
+</section>
+
+<!-- 9: Architecture + MCP (3 min) -->
+<section>
+<h2>Agent-as-User Architecture</h2>
+<div class="mermaid">
+flowchart TB
+    subgraph Host["Linux Host"]
+        subgraph SysConfig["/etc/agent-config/ — root-owned"]
+            C1["agent-build/mcp.json"]
+            C2["agent-review/mcp.json"]
+            C3["agent-deploy/mcp.json"]
+        end
+        subgraph A1["agent-build (UID)"]
+            A1M["~/memory  ~/tools  ~/work"]
+        end
+        subgraph A2["agent-review (UID)"]
+            A2M["~/memory  ~/tools  ~/work"]
+        end
+        subgraph A3["agent-deploy (UID)"]
+            A3M["~/memory  ~/tools  ~/work"]
+        end
+        C1 -.->|"read-only"| A1
+        C2 -.->|"read-only"| A2
+        C3 -.->|"read-only"| A3
+        EB["Event Bus — systemd socket activation"]
+        A1 --- EB
+        A2 --- EB
+        A3 --- EB
+        subgraph Services["Backing Services"]
+            MEM["AgentCore Memory"]
+            MOD["Model Store — btrfs"]
+            AUD["Audit — journald"]
+        end
+        EB --- Services
+    end
+</div>
+</section>
+
+<!-- 10: Privsep (3 min) -->
+<section>
+<h2>Privilege Separation & MCP Config</h2>
+<h3>The OpenSSH model, applied to agents</h3>
+<div class="mermaid">
+flowchart TB
+    subgraph Monitor["agent-monitor (root)"]
+        CFG["Reads /etc/agent-config/mcp.json"]
+        POLICY["Validates against MCP policy"]
+        EXEC["Executes privileged ops"]
+        CFG --> POLICY --> EXEC
+    end
+    subgraph Child["agent-runtime (agent-build UID)"]
+        WORK["Processes tasks"]
+        MEM["Reads/writes ~/memory"]
+        TOOLS["Uses MCP tools — sandboxed"]
+    end
+    Child -->|"snapshot /data/model"| Monitor
+    Monitor -->|"Allowed by mcp.json"| Child
+    Child -->|"read /etc/shadow"| Monitor
+    Monitor -->|"DENIED by mcp.json"| Child
+    subgraph Config["/etc/agent-config/agent-build/"]
+        MCP["mcp.json — root:agents 0644"]
+    end
+    Config -.->|"read-only bind mount"| Monitor
+</div>
+<p class="fragment"><span class="highlight">Why /etc/agent-config/ instead of ~/.config/</span><br>
+Agents cannot grant themselves new capabilities. MCP config is <strong>system policy</strong>.</p>
+</section>
+
+<!-- 11: Memory + Bridge (3 min) -->
+<section>
+<h2>Memory & Universal Replication</h2>
+<div class="mermaid">
+flowchart TB
+    subgraph Agent["Agent Process"]
+        RT["Agent Runtime"]
+    end
+    RT <--> W
+    RT <--> S
+    RT <--> LT
+    subgraph Working["Working Memory"]
+        W["tmpfs (RAM)<br/>512MB ⏱️ Minutes"]
+    end
+    subgraph Session["Session Memory"]
+        S["btrfs subvolume<br/>~/memory/session/ ⏱️ Hours–Days"]
+        SS["📸 Snapshots → btrfs send/receive"]
+    end
+    S --- SS
+    subgraph LongTerm["Long-Term Memory"]
+        LT["AgentCore / MemoriesDB<br/>~/memory/long-term/ ⏱️ Persistent"]
+    end
+    RESTART["Agent killed / recreated"] -.->|"cleared"| W
+    RESTART -.->|"preserved"| S
+    RESTART -.->|"preserved"| LT
+</div>
+<p class="fragment"><strong>Agents are cattle. Memory is pets.</strong><br>
+One primitive — btrfs send — replicates models, memory, work products, entire agents.</p>
+</section>
+
+<!-- 12: Container Comparison (2 min) -->
+<section>
+<h2>Why Not Containers?</h2>
+<table>
+<tr><th>Concern</th><th>Container/K8s</th><th>Agent-as-User</th></tr>
+<tr><td>Isolation</td><td>Namespace + cgroup</td><td>UID + cgroup + systemd</td></tr>
+<tr><td>Packaging</td><td>Docker image layers</td><td>cloud-init user def</td></tr>
+<tr><td>Orchestration</td><td>Control plane</td><td>Agent self-management</td></tr>
+<tr><td>State</td><td>PVC / StatefulSet</td><td>btrfs subvolume</td></tr>
+<tr><td>Replication</td><td>Registry pull</td><td>btrfs send (incremental)</td></tr>
+<tr><td>Security</td><td>Image scanning</td><td>MCP config + privsep</td></tr>
+<tr><td>Recovery</td><td>Pod restart + PVC</td><td>cloud-init + memory reconnect</td></tr>
+<tr><td>Overhead</td><td>~50-100MB/container</td><td class="accent">~0 (it's a process)</td></tr>
+</table>
+<p class="fragment">Containers solved real problems for stateless web services.<br>
+Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
+</section>
+
+<!-- 13: Gaps + Next Steps (2 min) -->
+<section>
+<h2>Gaps & Next Steps</h2>
+<table style="font-size:0.6em">
+<tr><th>Gap</th><th>K8s gives you</th><th>We'd need</th></tr>
+<tr><td>Multi-host</td><td>Service discovery</td><td>Agent gossip / registry</td></tr>
+<tr><td>Scaling</td><td><code>replicas: 50</code></td><td>UID templating</td></tr>
+<tr><td>Identity</td><td>ServiceAccount + RBAC</td><td>SPIFFE/SPIRE</td></tr>
+<tr><td>State conflicts</td><td>N/A (stateless)</td><td>Last snapshot wins</td></tr>
+</table>
+<p class="fragment" style="font-size:1.1em; margin-top:20px">
+<span class="accent">The agent is the new process.</span><br>
+<span class="highlight">The user account is the new container.</span><br>
+<span style="color:#63b3ed">cloud-init is the new orchestrator.</span><br>
+<span style="color:#9f7aea">btrfs is the new registry.</span><br><br>
+<em>We're not throwing away orchestration — we're moving it inside the agent.</em>
+</p>
+</section>
+
+<!-- 14: Q&A (2 min) -->
+<section>
+<h1>Q&A</h1>
+<p>
+<strong>Repository:</strong> github.com/davdunc/btrfs-replication-test<br>
+<strong>btrfs docs:</strong> btrfs.readthedocs.io<br>
+<strong>cloud-init:</strong> github.com/canonical/cloud-init<br>
+<strong>Firecracker:</strong> github.com/firecracker-microvm/firecracker<br>
+<strong>AgentCore:</strong> aws.amazon.com/agentcore<br>
+<strong>SPIFFE:</strong> spiffe.io<br>
+<strong>Fedora Cloud:</strong> #cloud:fedoraproject.im (Matrix)
+</p>
+</section>
+
+</div><!-- /slides -->
+</div><!-- /reveal -->
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'dark',
+  themeVariables: {
+    darkMode: true,
+    background: '#1a202c',
+    primaryColor: '#4299e1',
+    primaryTextColor: '#e2e8f0',
+    lineColor: '#a0aec0',
+    fontSize: '14px'
+  }
+});
+Reveal.initialize({
+  hash: true,
+  slideNumber: 'c/t',
+  transition: 'slide',
+  plugins: [ RevealHighlight, RevealNotes ],
+  width: 1280,
+  height: 720
+}).then(() => {
+  mermaid.run({ querySelector: '.mermaid' });
+});
+</script>
+</body>
+</html>
