@@ -246,30 +246,17 @@ Agents cannot grant themselves new capabilities. MCP config is <strong>system po
 <!-- 11: Memory + Bridge (3 min) -->
 <section>
 <h2>Memory & Universal Replication</h2>
-<div class="mermaid">
-flowchart TB
-    subgraph Agent["Agent Process"]
-        RT["Agent Runtime"]
-    end
-    RT <--> W
-    RT <--> S
-    RT <--> LT
-    subgraph Working["Working Memory"]
-        W["tmpfs — RAM — Minutes"]
-    end
-    subgraph Session["Session Memory"]
-        S["btrfs subvolume — Hours to Days"]
-        SS["Snapshots via btrfs send/receive"]
-    end
-    S --- SS
-    subgraph LongTerm["Long-Term Memory"]
-        LT["AgentCore / MemoriesDB — Persistent"]
-    end
-    RESTART["Agent killed / recreated"] -.->|"cleared"| W
+<div class="mermaid" style="max-height:400px">
+flowchart LR
+    RT["Agent Runtime"] <--> W["Working<br/>tmpfs — Minutes"]
+    RT <--> S["Session<br/>btrfs subvol — Days"]
+    RT <--> LT["Long-Term<br/>AgentCore — Persistent"]
+    S --- SS["btrfs send/receive"]
+    RESTART["Agent killed"] -.->|"cleared"| W
     RESTART -.->|"preserved"| S
     RESTART -.->|"preserved"| LT
 </div>
-<p class="fragment"><strong>Agents are cattle. Memory is pets.</strong><br>
+<p><strong>Agents are cattle. Memory is pets.</strong><br>
 One primitive — btrfs send — replicates models, memory, work products, entire agents.</p>
 </section>
 
