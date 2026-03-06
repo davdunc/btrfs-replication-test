@@ -71,19 +71,23 @@ rsync reads all 140GB just to figure that out.</p>
 <!-- SLIDE 4: Architecture -->
 <section>
 <h2>Replication Architecture</h2>
-<pre class="ascii">
-┌─────────────────────┐       btrfs send        ┌─────────────────────┐
-│   TRAINING NODE     │ ──────────────────────▶  │  INFERENCE NODE 1   │
-│   (p5.48xlarge)     │   incremental deltas     │  (r7i.4xlarge)      │
-│                     │   over SSH / netcat       │                     │
-│  /data (btrfs)      │                          │  /data (btrfs)      │
-│   └─ model/         │        ┌──────────────▶  │   └─ model-snap-v2/ │
-│   └─ model-snap-v1/ │        │                 └─────────────────────┘
-│   └─ model-snap-v2/ │  tee ──┤
-│                     │        │                 ┌─────────────────────┐
-└─────────────────────┘        └──────────────▶  │  INFERENCE NODE N   │
-                                                 └─────────────────────┘
-</pre>
+<div class="mermaid">
+flowchart LR
+    subgraph Source["TRAINING NODE (p5.48xlarge)"]
+        direction TB
+        M["/data/model"] --> S1["/data/model-snap-v1&#10;🔒 read-only"]
+        M --> S2["/data/model-snap-v2&#10;🔒 read-only"]
+    end
+    S2 -- "btrfs send --proto 2&#10;incremental delta" --> TEE((tee))
+    TEE -- "SSH pipe" --> T1
+    TEE -- "SSH pipe" --> T2
+    TEE -- "SSH pipe" --> T3
+    subgraph Targets["INFERENCE FLEET"]
+        T1["Inference Node 1&#10;/data/model-snap-v2"]
+        T2["Inference Node 2&#10;/data/model-snap-v2"]
+        T3["Inference Node N&#10;/data/model-snap-v2"]
+    end
+</div>
 <p>One-to-many via <code>tee</code> — single read, parallel delivery</p>
 </section>
 
@@ -257,35 +261,50 @@ And what if the agents themselves are just <strong>Linux users</strong>?</p>
 <!-- SLIDE 13: Architecture -->
 <section>
 <h2>Agent-as-User Architecture</h2>
-<pre class="ascii">
-┌──────────────────────────────────────────────────────────┐
-│                     Linux Host / microVM                  │
-│                                                          │
-│  /etc/agent-config/           ← root-owned, agent-readable│
-│  ├── agent-build/mcp.json       (agents cannot modify)   │
-│  ├── agent-review/mcp.json                               │
-│  └── agent-deploy/mcp.json                               │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
-│  │ agent-01 │  │ agent-02 │  │ agent-03 │  ← UIDs       │
-│  │ (build)  │  │ (review) │  │ (deploy) │               │
-│  ├──────────┤  ├──────────┤  ├──────────┤               │
-│  │ ~/memory │  │ ~/memory │  │ ~/memory │  ← btrfs      │
-│  │ ~/tools  │  │ ~/tools  │  │ ~/tools  │    subvols    │
-│  │ ~/work   │  │ ~/work   │  │ ~/work   │               │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘               │
-│       └──────────────┼──────────────┘                     │
-│              ┌───────▼────────┐                           │
-│              │   Event Bus    │  ← systemd socket act.    │
-│              └───────┬────────┘                           │
-│         ┌────────────┼────────────┐                       │
-│         ▼            ▼            ▼                       │
-│   ┌──────────┐ ┌──────────┐ ┌──────────┐                │
-│   │ AgentCore│ │  Model   │ │  Audit   │                │
-│   │ Memory   │ │  (btrfs) │ │(journal) │                │
-│   └──────────┘ └──────────┘ └──────────┘                │
-└──────────────────────────────────────────────────────────┘
-</pre>
+<div class="mermaid">
+flowchart TB
+    subgraph Host["Linux Host"]
+        direction TB
+        subgraph SysConfig["/etc/agent-config/ (root-owned)"]
+            direction LR
+            C1["agent-build/&#10;mcp.json"]
+            C2["agent-review/&#10;mcp.json"]
+            C3["agent-deploy/&#10;mcp.json"]
+        end
+        subgraph Agents["Agent Users (UIDs)"]
+            direction LR
+            subgraph A1["agent-build"]
+                A1M["~/memory"]
+                A1T["~/tools"]
+                A1W["~/work"]
+            end
+            subgraph A2["agent-review"]
+                A2M["~/memory"]
+                A2T["~/tools"]
+                A2W["~/work"]
+            end
+            subgraph A3["agent-deploy"]
+                A3M["~/memory"]
+                A3T["~/tools"]
+                A3W["~/work"]
+            end
+        end
+        C1 -.->|"read-only"| A1
+        C2 -.->|"read-only"| A2
+        C3 -.->|"read-only"| A3
+        EB["Event Bus&#10;systemd socket activation"]
+        A1 --- EB
+        A2 --- EB
+        A3 --- EB
+        subgraph Services["Backing Services"]
+            direction LR
+            MEM["Extended Memory&#10;AgentCore"]
+            MOD["Model Store&#10;btrfs subvolumes"]
+            AUD["Audit Log&#10;journald"]
+        end
+        EB --- Services
+    end
+</div>
 </section>
 
 <!-- SLIDE 14: cloud-init -->
@@ -357,27 +376,33 @@ NoNewPrivileges=true</code></pre>
 <section>
 <h2>Privilege Separation & MCP Config</h2>
 <h3>The OpenSSH model, applied to agents</h3>
-<pre class="ascii">
- OpenSSH privsep                    Agent privsep
- ──────────────                     ─────────────
- sshd (root)                        agent-monitor (root)
-   reads sshd_config                  reads /etc/agent-config/mcp.json
-   └─ sshd (sshd user)               └─ agent-runtime (agent UID)
-       └─ shell (user)                   └─ MCP tools (sandboxed)
-</pre>
-<pre class="ascii fragment">
-agent-runtime (agent-build)              agent-monitor (root)
-        │                                         │
-        ├── "snapshot /data/model" ──────────────▶ │
-        │                                  check mcp.json:
-        │                                  allowedCommands ✅
-        │                                  ◀── execute + return ──┤
-        │                                         │
-        ├── "read /etc/shadow" ──────────────────▶ │
-        │                                  check mcp.json:
-        │                                  deniedPaths ❌
-        │                                  ◀── DENIED ───────────┤
-</pre>
+<div class="mermaid">
+flowchart TB
+    subgraph Privsep["Privilege Separation"]
+        direction TB
+        subgraph Monitor["agent-monitor (root)"]
+            direction TB
+            CFG["Reads /etc/agent-config/&#10;agent-build/mcp.json"]
+            POLICY["Validates requests&#10;against MCP policy"]
+            EXEC["Executes privileged ops&#10;(mount, snapshot, network)"]
+            CFG --> POLICY --> EXEC
+        end
+        subgraph Child["agent-runtime (agent-build UID)"]
+            direction TB
+            WORK["Processes tasks"]
+            MEM["Reads/writes ~/memory"]
+            TOOLS["Uses MCP tools&#10;(sandboxed)"]
+        end
+        Child -->|"Request: snapshot /data/model"| Monitor
+        Monitor -->|"✅ Allowed by mcp.json"| Child
+        Child -->|"Request: read /etc/shadow"| Monitor
+        Monitor -->|"❌ Denied by mcp.json"| Child
+    end
+    subgraph Config["/etc/agent-config/agent-build/"]
+        MCP["mcp.json&#10;root:agents 0644&#10;Agent reads, cannot write"]
+    end
+    Config -.->|"read-only bind mount"| Monitor
+</div>
 <p class="fragment"><span class="highlight">Why /etc/agent-config/ instead of ~/.config/</span><br>
 Agents cannot grant themselves new capabilities.<br>
 MCP config is <strong>system policy</strong>, not user preference — same as <code>sshd_config</code>.</p>
@@ -386,16 +411,29 @@ MCP config is <strong>system policy</strong>, not user preference — same as <c
 <!-- SLIDE 17: Memory -->
 <section>
 <h2>Memory Architecture: Three Tiers</h2>
-<table>
-<tr><th>Tier</th><th>Backing</th><th>Lifetime</th><th>On restart</th></tr>
-<tr><td style="color:#fc8181">Working</td><td>tmpfs (RAM)</td><td>Minutes</td><td class="warn">Cleared</td></tr>
-<tr><td style="color:#f6e05e">Session</td><td>btrfs subvolume</td><td>Hours–days</td><td class="accent">Preserved</td></tr>
-<tr><td style="color:#68d391">Long-term</td><td>AgentCore / MemoriesDB</td><td>Persistent</td><td class="accent">Preserved</td></tr>
-</table>
-<pre><code class="language-bash">~/memory/
-├── working/          # tmpfs, cleared on restart
-├── session/          # btrfs, snapshotted & replicated
-└── long-term/        # mount point for memory service</code></pre>
+<div class="mermaid">
+flowchart TB
+    subgraph Agent["Agent Process"]
+        RT["Agent Runtime"]
+    end
+    RT <--> W
+    RT <--> S
+    RT <--> LT
+    subgraph Working["Working Memory"]
+        W["tmpfs (RAM)&#10;512MB ⏱️ Minutes"]
+    end
+    subgraph Session["Session Memory"]
+        S["btrfs subvolume&#10;~/memory/session/ ⏱️ Hours–Days"]
+        SS["📸 Snapshots → btrfs send/receive"]
+    end
+    S --- SS
+    subgraph LongTerm["Long-Term Memory"]
+        LT["AgentCore / MemoriesDB&#10;~/memory/long-term/ ⏱️ Persistent"]
+    end
+    RESTART["Agent killed / recreated"] -.->|"cleared"| W
+    RESTART -.->|"preserved"| S
+    RESTART -.->|"preserved"| LT
+</div>
 <p class="fragment"><strong>Agents are cattle. Memory is pets.</strong><br>
 Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
 </section>
@@ -403,29 +441,21 @@ Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
 <!-- SLIDE 18: Event-Driven -->
 <section>
 <h2>Event-Driven Activation & microVMs</h2>
-<pre class="ascii">
-Agent receives task
-         │
-         ▼
-┌─────────────────────────┐
-│ Agent evaluates:        │
-│  - Trust level          │
-│  - Resource needs       │
-│  - Data locality        │
-└────────────┬────────────┘
-             │
-     ┌───────┼───────┐
-     ▼       ▼       ▼
-  On-host  microVM  Cloud
-  process  (125ms)  (EC2 spot)
-  ⚡ 0ms    boot    + btrfs send
-</pre>
-<ul>
-<li>Lightweight: run as agent user process</li>
-<li>Untrusted: Firecracker microVM, ~30MB overhead</li>
-<li>Heavy compute: EC2 spot + btrfs-send the model</li>
-<li>The agent <strong>IS</strong> the scheduler</li>
-</ul>
+<div class="mermaid">
+flowchart TB
+    EVT["Event arrives&#10;(systemd .socket)"] --> WAKE["Socket activation&#10;spawns agent service"]
+    WAKE --> EVAL{"Agent evaluates task"}
+    EVAL -->|"Trusted + lightweight"| LOCAL["On-host process&#10;⚡ 0ms overhead"]
+    EVAL -->|"Untrusted / isolated"| MVM["Firecracker microVM&#10;⚡ 125ms boot&#10;~30MB overhead"]
+    EVAL -->|"Heavy compute"| CLOUD["EC2 Spot instance&#10;btrfs send model →&#10;run training →&#10;btrfs send results ←"]
+    LOCAL --> RESULT["Results → ~/work/"]
+    MVM --> RESULT
+    CLOUD --> RESULT
+    RESULT --> REVIEW{"Agent reviews output"}
+    REVIEW -->|"Accept"| MERGE["Merge into&#10;agent subvolume"]
+    REVIEW -->|"Reject"| DISCARD["Discard scratch&#10;subvolume"]
+</div>
+<p>The agent <strong>IS</strong> the scheduler.</p>
 </section>
 
 <!-- SLIDE 19: Transparency -->
@@ -489,19 +519,31 @@ Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
 <!-- SLIDE 22: Gaps -->
 <section>
 <h2>What This Doesn't Solve (Yet)</h2>
-<table>
-<tr><th>Problem</th><th>K8s gives you</th><th>We'd need to build</th></tr>
-<tr><td>Multi-host coordination</td><td>Service discovery, DNS</td><td>Agent gossip / registry</td></tr>
-<tr><td>Horizontal scaling</td><td><code>replicas: 50</code></td><td>UID templating (awkward)</td></tr>
-<tr><td>Cross-host identity</td><td>ServiceAccount + RBAC</td><td>SPIFFE/SPIRE</td></tr>
-<tr><td>Secret rotation</td><td>Secrets + CSI</td><td>Vault / kernel keyring</td></tr>
-<tr><td>Memory conflicts</td><td>N/A (stateless)</td><td>No merge — last snapshot wins</td></tr>
-<tr><td>Admission control</td><td>OPA / Gatekeeper</td><td>Policy in agent-shell / PAM</td></tr>
-</table>
-<p class="fragment"><strong>Other edge cases:</strong><br>
-Rollback is all-or-nothing per subvolume •
-Dynamic task deps need workflow engine •
-Agents can't negotiate resources</p>
+<div class="mermaid">
+mindmap
+  root(("What This&#10;Doesn't Solve"))
+    Multi-Host
+      Service discovery
+      Cross-host DNS
+      Agent gossip protocol needed
+    Scaling
+      replicas: 50 is trivial in k8s
+      UID templating gets awkward
+    Identity
+      UIDs are local
+      Need SPIFFE/SPIRE
+    State Conflicts
+      btrfs send is eventually consistent
+      No merge strategy
+      Last snapshot wins
+    Observability
+      journald is per-host
+      Need centralized aggregation
+    Fine-Grained Control
+      No admission control
+      No resource negotiation
+      Rollback is all-or-nothing
+</div>
 </section>
 
 <!-- SLIDE 23: Next Steps -->
@@ -548,7 +590,20 @@ Agents can't negotiate resources</p>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <script>
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'dark',
+  themeVariables: {
+    darkMode: true,
+    background: '#1a202c',
+    primaryColor: '#4299e1',
+    primaryTextColor: '#e2e8f0',
+    lineColor: '#a0aec0',
+    fontSize: '14px'
+  }
+});
 Reveal.initialize({
   hash: true,
   slideNumber: 'c/t',
@@ -556,6 +611,8 @@ Reveal.initialize({
   plugins: [ RevealHighlight, RevealNotes ],
   width: 1280,
   height: 720
+}).then(() => {
+  mermaid.run({ querySelector: '.mermaid' });
 });
 </script>
 </body>
