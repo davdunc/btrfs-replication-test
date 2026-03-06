@@ -156,7 +156,7 @@ btrfs send --proto 2 --compressed-data \
 <tr><th>Operation</th><th>Time</th><th>Network</th></tr>
 <tr><td>Snapshot creation</td><td>O(1) — metadata</td><td>None</td></tr>
 <tr><td>Full send (100 GB)</td><td>O(data size)</td><td>~100 GB</td></tr>
-<tr><td>Incremental (2% changed)</td><td>O(delta)</td><td class="accent">~2 GB</td></tr>
+<tr><td>Incremental (1/4 shards changed)</td><td>O(changed shards)</td><td class="accent">~25% of model</td></tr>
 <tr><td>Writable snapshot on target</td><td>O(1)</td><td>None</td></tr>
 <tr><td>Rollback</td><td>O(1)</td><td>None</td></tr>
 </table>
@@ -170,10 +170,11 @@ btrfs send --proto 2 --compressed-data \
 <tr><td>S3 sync</td><td>O(model)</td><td>File-level</td><td>Re-download</td><td>Low</td></tr>
 <tr><td>rsync</td><td>O(model) checksum</td><td>Block-level</td><td>Re-sync</td><td>Medium</td></tr>
 <tr><td>Container layers</td><td>O(layer)</td><td>Layer-level</td><td>Tag swap</td><td>High</td></tr>
-<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>Block, no checksum</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
+<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>File-level (CoW)</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
 </table>
-<p class="fragment">btrfs wins on incremental (no checksumming) and rollback (local snapshots).<br>
-Tradeoff: need btrfs on both ends.</p>
+<p class="fragment">btrfs wins on rollback (instant snapshots) and fan-out (tee to N targets).<br>
+Incremental = unchanged files are free. Rewritten files send in full (CoW).<br>
+<span class="warn">⚠️ Overwriting a file rewrites all its blocks — send transmits the whole file, not a content diff.</span></p>
 </section>
 
 <!-- TRANSITION -->

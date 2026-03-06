@@ -199,7 +199,7 @@ btrfs send -p /data/model-snap-v1 /data/model-snap-v2 | \
 |-----------|------|-------------|
 | Snapshot creation | O(1) — metadata only | None |
 | Full send (100 GB model) | O(data size) | ~100 GB |
-| Incremental send (2% changed) | O(delta size) | ~2 GB |
+| Incremental send (1/4 shards changed) | O(changed shards) | ~25% of model |
 | Writable snapshot on target | O(1) | None |
 | Rollback to previous version | O(1) | None |
 
@@ -214,11 +214,14 @@ Add `mount -o compress=zstd` for 15-30% savings on model weights.
 | S3 sync + download | O(model) | File-level | Re-download | Low |
 | rsync | O(model) checksum | Block-level | Re-sync | Medium |
 | Container layers | O(layer) | Layer-level | Tag swap | High |
-| **btrfs send/receive** | **O(model)** | **Block-level, no checksum** | **Instant** | **None** |
+| **btrfs send/receive** | **O(model)** | **File-level (CoW)** | **Instant** | **None** |
 
-*Speaker notes: btrfs wins on incremental because it doesn't need to checksum.
-It wins on rollback because snapshots are local and instant. The tradeoff is
-you need btrfs on both ends.*
+*Speaker notes: btrfs send compares btree metadata, not file content. CoW means
+any rewritten file has all-new blocks — send transmits the whole file. The win is
+on UNCHANGED files (zero cost) and rollback (instant local snapshots). Sharded
+models benefit because unchanged shards are free. A single monolithic weights.bin
+that gets fully rewritten gains nothing from incremental send — use rsync for that.
+Tradeoff: need btrfs on both ends.*
 
 ---
 
