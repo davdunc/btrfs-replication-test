@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BTRFS, Agents, and the Post-Container Stack</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+<style>
+  .reveal { font-size: 28px; }
+  .reveal h1 { font-size: 1.8em; color: #63b3ed; }
+  .reveal h2 { font-size: 1.4em; color: #63b3ed; }
+  .reveal h3 { font-size: 1.1em; color: #9f7aea; }
+  .reveal pre { font-size: 0.55em; width: 95%; }
+  .reveal code { font-size: 0.9em; }
+  .reveal table { font-size: 0.65em; margin: 0 auto; }
+  .reveal th { background: #2d3748; color: #63b3ed; }
+  .reveal td { background: #1a202c; }
+  .reveal .mermaid { font-size: 0.7em; }
+  .reveal .slide-number { font-size: 14px; }
+  .part-divider { color: #ed8936 !important; }
+  .reveal ul { font-size: 0.85em; }
+  .reveal li { margin-bottom: 0.3em; }
+  .accent { color: #48bb78; }
+  .warn { color: #fc8181; }
+  .highlight { color: #ed8936; }
+  pre.ascii { font-size: 0.45em; line-height: 1.3; text-align: left; background: #1a202c; padding: 15px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- SLIDE 1: Title -->
+<section>
+<h1>BTRFS, Agents, and the<br>Post-Container Stack</h1>
+<p>Two ideas, one primitive:</p>
+<ol>
+<li>Replicate LLM models with filesystem-level deltas</li>
+<li>Deploy AI agents as Linux users, not containers</li>
+</ol>
+<p><small>github.com/davdunc/btrfs-replication-test</small></p>
+</section>
+
+<!-- SLIDE 2: The Problem -->
+<section>
+<h2>The Problem: Model Distribution</h2>
+<ul>
+<li>70B parameter model at fp16 ≈ <span class="warn">140 GB</span></li>
+<li>Fine-tuning changes a <em>fraction</em> of the weights</li>
+<li>Redeploying to N servers = <span class="warn">N × 140 GB</span> transferred</li>
+<li>S3 sync, rsync, container layers — all file-level granularity</li>
+</ul>
+<p class="fragment"><strong>Every training iteration triggers full redistribution.</strong></p>
+</section>
+
+<!-- SLIDE 3: The Insight -->
+<section>
+<h2>The Insight: Filesystem-Level Deltas</h2>
+<pre><code class="language-bash">btrfs send -p &lt;parent-snapshot&gt; &lt;child-snapshot&gt;</code></pre>
+<ul>
+<li>Copy-on-write tracks which <strong>blocks</strong> actually changed</li>
+<li>Send stream = only modified extents</li>
+<li>No checksumming, no file-level diffing</li>
+<li>Receive applies delta <span class="accent">atomically</span> on target</li>
+</ul>
+<p class="fragment">For 140GB model with 2GB changed → <span class="accent">transmit ~2GB</span><br>
+rsync reads all 140GB just to figure that out.</p>
+</section>
+
+<!-- SLIDE 4: Architecture -->
+<section>
+<h2>Replication Architecture</h2>
+<pre class="ascii">
+┌─────────────────────┐       btrfs send        ┌─────────────────────┐
+│   TRAINING NODE     │ ──────────────────────▶  │  INFERENCE NODE 1   │
+│   (p5.48xlarge)     │   incremental deltas     │  (r7i.4xlarge)      │
+│                     │   over SSH / netcat       │                     │
+│  /data (btrfs)      │                          │  /data (btrfs)      │
+│   └─ model/         │        ┌──────────────▶  │   └─ model-snap-v2/ │
+│   └─ model-snap-v1/ │        │                 └─────────────────────┘
+│   └─ model-snap-v2/ │  tee ──┤
+│                     │        │                 ┌─────────────────────┐
+└─────────────────────┘        └──────────────▶  │  INFERENCE NODE N   │
+                                                 └─────────────────────┘
+</pre>
+<p>One-to-many via <code>tee</code> — single read, parallel delivery</p>
+</section>
+
+<!-- SLIDE 5: Demo Environment -->
+<section>
+<h2>Demo Environment</h2>
+<p>Fedora Cloud Base 43 on EC2 — two instances, btrfs data volumes</p>
+<pre><code class="language-bash"># User data: runs at boot
+dnf install -y btrfs-progs
+
+mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
+mkdir -p /data
+mount -o noatime /dev/nvme1n1 /data
+
+# Source only: create the model subvolume
+btrfs subvolume create /data/model</code></pre>
+<ul>
+<li>AMI: Fedora-Cloud-Base-AmazonEC2.x86_64-43</li>
+<li>Separate user-data for source and target</li>
+<li>50 GB gp3 volumes formatted as btrfs</li>
+</ul>
+</section>
+
+<!-- SLIDE 6: Full Send -->
+<section>
+<h2>Demo: Write, Snapshot, Full Send</h2>
+<pre><code class="language-bash"># Write model data
+dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
+echo '{"model":"test-llm","version":"1.0"}' > /data/model/config.json
+
+# Read-only snapshot (required for send)
+btrfs subvolume snapshot -r /data/model /data/model-snap-v1
+
+# Full send to target (protocol v2, compressed)
+btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
+  ssh fedora@target 'sudo btrfs receive /data/'</code></pre>
+<ul>
+<li>Snapshot is <span class="accent">instantaneous</span> — CoW metadata operation</li>
+<li><code>--proto 2 --compressed-data</code>: no decompression overhead</li>
+</ul>
+</section>
+
+<!-- SLIDE 7: Incremental Send -->
+<section>
+<h2>Demo: Incremental Send</h2>
+<pre><code class="language-bash"># Model updated by training
+dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
+echo '{"model":"test-llm","version":"2.0"}' > /data/model/config.json
+
+# New snapshot
+btrfs subvolume snapshot -r /data/model /data/model-snap-v2
+
+# Incremental: only the delta between v1 and v2
+btrfs send --proto 2 --compressed-data \
+  -p /data/model-snap-v1 /data/model-snap-v2 | \
+  ssh fedora@target 'sudo btrfs receive /data/'</code></pre>
+<p class="warn">⚠️ Never flip received read-only snapshots to read-write<br>
+— breaks <code>received_uuid</code>. Create a new writable snapshot instead.</p>
+</section>
+
+
+<!-- SLIDE 8: One-to-Many & Performance -->
+<section>
+<h2>One-to-Many & Performance</h2>
+<pre><code class="language-bash">btrfs send -p /data/model-snap-v1 /data/model-snap-v2 | \
+  tee >(ssh fedora@target2 'sudo btrfs receive /data/') \
+      >(ssh fedora@target3 'sudo btrfs receive /data/') | \
+  ssh fedora@target4 'sudo btrfs receive /data/'</code></pre>
+<table>
+<tr><th>Operation</th><th>Time</th><th>Network</th></tr>
+<tr><td>Snapshot creation</td><td>O(1) — metadata</td><td>None</td></tr>
+<tr><td>Full send (100 GB)</td><td>O(data size)</td><td>~100 GB</td></tr>
+<tr><td>Incremental (2% changed)</td><td>O(delta)</td><td class="accent">~2 GB</td></tr>
+<tr><td>Writable snapshot on target</td><td>O(1)</td><td>None</td></tr>
+<tr><td>Rollback</td><td>O(1)</td><td>None</td></tr>
+</table>
+</section>
+
+<!-- SLIDE 9: Comparison -->
+<section>
+<h2>Comparison with Alternatives</h2>
+<table>
+<tr><th>Approach</th><th>Full</th><th>Incremental</th><th>Rollback</th><th>Overhead</th></tr>
+<tr><td>S3 sync</td><td>O(model)</td><td>File-level</td><td>Re-download</td><td>Low</td></tr>
+<tr><td>rsync</td><td>O(model) checksum</td><td>Block-level</td><td>Re-sync</td><td>Medium</td></tr>
+<tr><td>Container layers</td><td>O(layer)</td><td>Layer-level</td><td>Tag swap</td><td>High</td></tr>
+<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>Block, no checksum</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
+</table>
+<p class="fragment">btrfs wins on incremental (no checksumming) and rollback (local snapshots).<br>
+Tradeoff: need btrfs on both ends.</p>
+</section>
+
+<!-- TRANSITION -->
+<section data-background-color="#ed8936">
+<h1 style="color:#1a202c">TRANSITION</h1>
+<p style="color:#1a202c; font-size:1.2em">btrfs as a replication primitive for model weights.<br><br>
+Now: what if we use the same primitive for <strong>everything</strong> —<br>
+agent state, memory, work products?<br><br>
+And what if the agents themselves are just <strong>Linux users</strong>?</p>
+</section>
+
+<!-- SLIDE 10: The Thesis -->
+<section>
+<h2>Agents as Service Account Users</h2>
+<p><strong>Containers solved packaging. Agents don't have a packaging problem.</strong></p>
+<ul>
+<li>An agent is: runtime + model + memory + tools</li>
+<li>A Linux user provides: UID/GID, cgroups, home dir, credential scope</li>
+<li>K8s orchestrates <em>where</em> things run. Agents decide <em>what</em> to do.</li>
+<li>Orchestrating decision-makers with a decision-making system is redundant.</li>
+</ul>
+<pre class="ascii fragment">
+2006: EC2 user-data     — shell scripts
+2010: cloud-init        — declarative config
+2015: Dockerfiles       — container packaging
+2018: Helm charts       — container orchestration
+2026: cloud-init agents — agent provisioning  ← full circle
+</pre>
+</section>
+
+<!-- SLIDE 11: Architecture -->
+<section>
+<h2>Agent-as-User Architecture</h2>
+<pre class="ascii">
+┌──────────────────────────────────────────────────────────┐
+│                     Linux Host / microVM                  │
+│                                                          │
+│  /etc/agent-config/           ← root-owned, agent-readable│
+│  ├── agent-build/mcp.json       (agents cannot modify)   │
+│  ├── agent-review/mcp.json                               │
+│  └── agent-deploy/mcp.json                               │
+│                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
+│  │ agent-01 │  │ agent-02 │  │ agent-03 │  ← UIDs       │
+│  │ (build)  │  │ (review) │  │ (deploy) │               │
+│  ├──────────┤  ├──────────┤  ├──────────┤               │
+│  │ ~/memory │  │ ~/memory │  │ ~/memory │  ← btrfs      │
+│  │ ~/tools  │  │ ~/tools  │  │ ~/tools  │    subvols    │
+│  │ ~/work   │  │ ~/work   │  │ ~/work   │               │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘               │
+│       └──────────────┼──────────────┘                     │
+│              ┌───────▼────────┐                           │
+│              │   Event Bus    │  ← systemd socket act.    │
+│              └───────┬────────┘                           │
+│         ┌────────────┼────────────┐                       │
+│         ▼            ▼            ▼                       │
+│   ┌──────────┐ ┌──────────┐ ┌──────────┐                │
+│   │ AgentCore│ │  Model   │ │  Audit   │                │
+│   │ Memory   │ │  (btrfs) │ │(journal) │                │
+│   └──────────┘ └──────────┘ └──────────┘                │
+└──────────────────────────────────────────────────────────┘
+</pre>
+</section>
+
+<!-- SLIDE 12: cloud-init -->
+<section>
+<h2>cloud-init: The Agent Provisioner</h2>
+<pre><code class="language-yaml">#cloud-config
+users:
+  - name: agent-build
+    system: true
+    shell: /usr/bin/agent-shell
+    groups: [agents]
+    no_create_home: true
+
+runcmd:
+  - btrfs subvolume create /data/agents/agent-build
+  - mkdir -p /data/agents/agent-build/{memory,tools,work}
+  - chown -R agent-build:agents /data/agents/agent-build
+  - mount --bind /data/agents/agent-build /home/agent-build
+
+  # MCP config — root-owned, agent-readable
+  - install -m 0644 -o root -g agents \
+      /dev/stdin /etc/agent-config/agent-build/mcp.json
+
+  - systemctl enable --now agent@build</code></pre>
+<pre><code class="language-json">// /etc/agent-config/agent-build/mcp.json
+{ "mcpServers": {
+    "filesystem": { "command": "mcp-fs", "args": ["--root", "/home/agent-build"] },
+    "btrfs": { "command": "mcp-btrfs", "args": ["--subvolume", "/data/agents/agent-build"] }
+  },
+  "permissions": {
+    "allowedPaths": ["/home/agent-build", "/data/model"],
+    "deniedPaths": ["/etc", "/root", "/home/agent-*"],
+    "allowedCommands": ["btrfs subvolume snapshot", "btrfs send"]
+  }
+}</code></pre>
+</section>
+
+
+<!-- SLIDE 13: systemd -->
+<section>
+<h2>systemd: Lifecycle Without an Orchestrator</h2>
+<pre><code class="language-ini"># /etc/systemd/system/agent@.service
+[Service]
+Type=notify
+User=root
+ExecStart=/usr/libexec/agent-monitor \
+  --config /etc/agent-config/agent-%i/mcp.json \
+  --user agent-%i --work-dir /home/agent-%i
+Restart=always
+
+# Resource isolation — the "container" is a cgroup
+CPUQuota=200%
+MemoryMax=8G
+
+# Security — the "sandbox" is systemd
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/etc/agent-config/agent-%i
+BindPaths=/home/agent-%i
+PrivateTmp=true
+NoNewPrivileges=true</code></pre>
+<ul>
+<li><code>BindReadOnlyPaths</code> for MCP config — read, not modify</li>
+<li><code>agent-monitor</code> is the privileged parent (next slide)</li>
+</ul>
+</section>
+
+<!-- SLIDE 14: Privilege Separation -->
+<section>
+<h2>Privilege Separation & MCP Config</h2>
+<h3>The OpenSSH model, applied to agents</h3>
+<pre class="ascii">
+ OpenSSH privsep                    Agent privsep
+ ──────────────                     ─────────────
+ sshd (root)                        agent-monitor (root)
+   reads sshd_config                  reads /etc/agent-config/mcp.json
+   └─ sshd (sshd user)               └─ agent-runtime (agent UID)
+       └─ shell (user)                   └─ MCP tools (sandboxed)
+</pre>
+<pre class="ascii fragment">
+agent-runtime (agent-build)              agent-monitor (root)
+        │                                         │
+        ├── "snapshot /data/model" ──────────────▶ │
+        │                                  check mcp.json:
+        │                                  allowedCommands ✅
+        │                                  ◀── execute + return ──┤
+        │                                         │
+        ├── "read /etc/shadow" ──────────────────▶ │
+        │                                  check mcp.json:
+        │                                  deniedPaths ❌
+        │                                  ◀── DENIED ───────────┤
+</pre>
+<p class="fragment"><span class="highlight">Why /etc/agent-config/ instead of ~/.config/</span><br>
+Agents cannot grant themselves new capabilities.<br>
+MCP config is <strong>system policy</strong>, not user preference — same as <code>sshd_config</code>.</p>
+</section>
+
+<!-- SLIDE 15: Memory -->
+<section>
+<h2>Memory Architecture: Three Tiers</h2>
+<table>
+<tr><th>Tier</th><th>Backing</th><th>Lifetime</th><th>On restart</th></tr>
+<tr><td style="color:#fc8181">Working</td><td>tmpfs (RAM)</td><td>Minutes</td><td class="warn">Cleared</td></tr>
+<tr><td style="color:#f6e05e">Session</td><td>btrfs subvolume</td><td>Hours–days</td><td class="accent">Preserved</td></tr>
+<tr><td style="color:#68d391">Long-term</td><td>AgentCore / MemoriesDB</td><td>Persistent</td><td class="accent">Preserved</td></tr>
+</table>
+<pre><code class="language-bash">~/memory/
+├── working/          # tmpfs, cleared on restart
+├── session/          # btrfs, snapshotted & replicated
+└── long-term/        # mount point for memory service</code></pre>
+<p class="fragment"><strong>Agents are cattle. Memory is pets.</strong><br>
+Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
+</section>
+
+<!-- SLIDE 16: Event-Driven -->
+<section>
+<h2>Event-Driven Activation & microVMs</h2>
+<pre class="ascii">
+Agent receives task
+         │
+         ▼
+┌─────────────────────────┐
+│ Agent evaluates:        │
+│  - Trust level          │
+│  - Resource needs       │
+│  - Data locality        │
+└────────────┬────────────┘
+             │
+     ┌───────┼───────┐
+     ▼       ▼       ▼
+  On-host  microVM  Cloud
+  process  (125ms)  (EC2 spot)
+  ⚡ 0ms    boot    + btrfs send
+</pre>
+<ul>
+<li>Lightweight: run as agent user process</li>
+<li>Untrusted: Firecracker microVM, ~30MB overhead</li>
+<li>Heavy compute: EC2 spot + btrfs-send the model</li>
+<li>The agent <strong>IS</strong> the scheduler</li>
+</ul>
+</section>
+
+<!-- SLIDE 17: Transparency -->
+<section>
+<h2>Transparency & Peer Review</h2>
+<pre><code class="language-bash">~/work/
+├── 2026-03-05T14:30:00-build-widget/
+│   ├── task.json          # what was requested
+│   ├── plan.json          # what the agent decided
+│   ├── actions.log        # what it did (append-only)
+│   ├── artifacts/         # what it produced
+│   └── review-request.json</code></pre>
+<ul>
+<li><code>actions.log</code> is append-only (<code>chattr +a</code>) — can't rewrite history</li>
+<li>Peer agents read ~/work/ via group permissions</li>
+<li>btrfs snapshots before/after = complete diff</li>
+<li>Better auditability than most human engineers</li>
+</ul>
+</section>
+
+<!-- SLIDE 18: The Bridge -->
+<section>
+<h2>btrfs: Universal Replication Layer</h2>
+<p><strong>One primitive for everything</strong></p>
+<pre><code class="language-bash"># Replicate model weights (Part 1)
+btrfs send --proto 2 --compressed-data \
+  -p /data/model-snap-v1 /data/model-snap-v2 | \
+  ssh target 'sudo btrfs receive /data/'
+
+# Replicate agent session memory (Part 2)
+btrfs send --proto 2 --compressed-data \
+  -p .../memory/session-snap-prev .../memory/session-snap-curr | \
+  ssh target 'sudo btrfs receive /data/agents/agent-build/memory/'
+
+# Migrate entire agent to new host
+btrfs send /data/agents/agent-build-snap | \
+  ssh new-host 'sudo btrfs receive /data/agents/'</code></pre>
+<p>Models, memory, work products, full agent migration.<br>
+Same mechanism. No registry. No image layers.</p>
+</section>
+
+
+<!-- SLIDE 19: Why Not Containers -->
+<section>
+<h2>Why Not Containers?</h2>
+<table>
+<tr><th>Concern</th><th>Container/K8s</th><th>Agent-as-User</th></tr>
+<tr><td>Isolation</td><td>Namespace + cgroup</td><td>UID + cgroup + systemd</td></tr>
+<tr><td>Packaging</td><td>Docker image layers</td><td>cloud-init user def</td></tr>
+<tr><td>Orchestration</td><td>Control plane</td><td>Agent self-management</td></tr>
+<tr><td>State</td><td>PVC / StatefulSet</td><td>btrfs subvolume</td></tr>
+<tr><td>Replication</td><td>Registry pull</td><td>btrfs send (incremental)</td></tr>
+<tr><td>Security</td><td>Image scanning</td><td>MCP config + privsep</td></tr>
+<tr><td>Recovery</td><td>Pod restart + PVC</td><td>cloud-init + memory reconnect</td></tr>
+<tr><td>Overhead</td><td>~50-100MB/container</td><td class="accent">~0 (it's a process)</td></tr>
+</table>
+<p class="fragment">Containers solved real problems for stateless web services.<br>
+Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
+</section>
+
+<!-- SLIDE 20: Gaps -->
+<section>
+<h2>What This Doesn't Solve (Yet)</h2>
+<table>
+<tr><th>Problem</th><th>K8s gives you</th><th>We'd need to build</th></tr>
+<tr><td>Multi-host coordination</td><td>Service discovery, DNS</td><td>Agent gossip / registry</td></tr>
+<tr><td>Horizontal scaling</td><td><code>replicas: 50</code></td><td>UID templating (awkward)</td></tr>
+<tr><td>Cross-host identity</td><td>ServiceAccount + RBAC</td><td>SPIFFE/SPIRE</td></tr>
+<tr><td>Secret rotation</td><td>Secrets + CSI</td><td>Vault / kernel keyring</td></tr>
+<tr><td>Memory conflicts</td><td>N/A (stateless)</td><td>No merge — last snapshot wins</td></tr>
+<tr><td>Admission control</td><td>OPA / Gatekeeper</td><td>Policy in agent-shell / PAM</td></tr>
+</table>
+<p class="fragment"><strong>Other edge cases:</strong><br>
+Rollback is all-or-nothing per subvolume •
+Dynamic task deps need workflow engine •
+Agents can't negotiate resources</p>
+</section>
+
+<!-- SLIDE 21: Next Steps -->
+<section>
+<h2>Next Steps</h2>
+<h3>Building</h3>
+<ul>
+<li>cloud-init module for agent provisioning (PR upstream)</li>
+<li><code>agent-monitor</code> + <code>agent-runtime</code> privsep implementation</li>
+<li>AgentCore adapter for ~/memory/long-term</li>
+<li>SPIFFE integration for cross-host identity</li>
+</ul>
+<h3>Testing</h3>
+<ul>
+<li>btrfs send/receive benchmarks on 70B+ models</li>
+<li>Firecracker microVM + systemd socket activation</li>
+<li>Multi-host memory replication with conflict detection</li>
+</ul>
+<p class="fragment" style="font-size:1.1em; margin-top:30px">
+<span class="accent">The agent is the new process.</span><br>
+<span class="highlight">The user account is the new container.</span><br>
+<span style="color:#63b3ed">cloud-init is the new orchestrator.</span><br>
+<span style="color:#9f7aea">btrfs is the new registry.</span><br><br>
+<em>We're not throwing away orchestration — we're moving it inside the agent.</em>
+</p>
+</section>
+
+<!-- SLIDE 22: Q&A -->
+<section>
+<h1>Q&A</h1>
+<p>
+<strong>Repository:</strong> github.com/davdunc/btrfs-replication-test<br>
+<strong>btrfs docs:</strong> btrfs.readthedocs.io<br>
+<strong>cloud-init:</strong> github.com/canonical/cloud-init<br>
+<strong>Firecracker:</strong> github.com/firecracker-microvm/firecracker<br>
+<strong>AgentCore:</strong> aws.amazon.com/agentcore<br>
+<strong>SPIFFE:</strong> spiffe.io
+</p>
+</section>
+
+</div><!-- /slides -->
+</div><!-- /reveal -->
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  slideNumber: 'c/t',
+  transition: 'slide',
+  plugins: [ RevealHighlight, RevealNotes ],
+  width: 1280,
+  height: 720
+});
+</script>
+</body>
+</html>
