@@ -491,31 +491,19 @@ Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
 <!-- SLIDE 22: Gaps -->
 <section>
 <h2>What This Doesn't Solve (Yet)</h2>
-<div class="mermaid">
-mindmap
-  root(("What This<br/>Doesn't Solve"))
-    Multi-Host
-      Service discovery
-      Cross-host DNS
-      Agent gossip protocol needed
-    Scaling
-      replicas: 50 is trivial in k8s
-      UID templating gets awkward
-    Identity
-      UIDs are local
-      Need SPIFFE/SPIRE
-    State Conflicts
-      btrfs send is eventually consistent
-      No merge strategy
-      Last snapshot wins
-    Observability
-      journald is per-host
-      Need centralized aggregation
-    Fine-Grained Control
-      No admission control
-      No resource negotiation
-      Rollback is all-or-nothing
-</div>
+<table>
+<tr><th>Problem</th><th>K8s gives you</th><th>We'd need to build</th></tr>
+<tr><td>Multi-host coordination</td><td>Service discovery, DNS</td><td>Agent gossip / registry</td></tr>
+<tr><td>Horizontal scaling</td><td><code>replicas: 50</code></td><td>UID templating (awkward)</td></tr>
+<tr><td>Cross-host identity</td><td>ServiceAccount + RBAC</td><td>SPIFFE/SPIRE</td></tr>
+<tr><td>Secret rotation</td><td>Secrets + CSI</td><td>Vault / kernel keyring</td></tr>
+<tr><td>Memory conflicts</td><td>N/A (stateless)</td><td>No merge — last snapshot wins</td></tr>
+<tr><td>Admission control</td><td>OPA / Gatekeeper</td><td>Policy in agent-shell / PAM</td></tr>
+</table>
+<p class="fragment"><strong>Other edge cases:</strong><br>
+Rollback is all-or-nothing per subvolume •
+journald is per-host (need centralized aggregation) •
+Agents can't negotiate resources</p>
 </section>
 
 <!-- SLIDE 23: Next Steps -->
