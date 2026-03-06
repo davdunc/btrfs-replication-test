@@ -207,21 +207,61 @@ Add `mount -o compress=zstd` for 15-30% savings on model weights.
 
 ---
 
-## Slide 9: Comparison with Alternatives (2 min)
+## Slide 9: The Elephant in the Room (3 min)
+
+**CoW tracks *writes*, not *value changes*.**
+
+| Checkpoint pattern | Incremental send result |
+|---|---|
+| ❌ `torch.save()` / safetensors write | Full model (all blocks new) |
+| ❌ `save_pretrained()` to new file | Full model |
+| ✅ mmap + partial write (in-place) | Only touched blocks |
+| ✅ Sharded model — unchanged shards | Zero bytes |
+| ✅ Agent session memory (append/update) | Only new blocks |
+
+Standard ML checkpointing defeats the delta. This is not a btrfs limitation — it's a format problem.
+
+*Speaker notes: This is the slide where you get ahead of the question. Anyone who has
+trained models knows torch.save writes a new file. Be direct: "If you torch.save a 140GB
+model, btrfs send transmits 140GB. Full stop." Then pivot to the next slide.*
+
+---
+
+## Slide 10: Making the Delta Real (3 min)
+
+**btrfs as transport primitive + CoW-friendly format**
+
+The interesting research question: design a checkpoint format where `btrfs send -p` = semantic diff.
+
+- **Flat mmap'd tensor files** with stable offsets per layer
+- Fine-tuning writes only to modified layer pages
+- LoRA adapters: base weights never written → zero delta
+- GGUF already supports mmap for *inference* — extend to checkpointing
+
+btrfs is the transport. The format makes it efficient.
+
+*Speaker notes: This is where the talk becomes a research contribution rather than
+just a demo. The format doesn't exist yet for checkpointing — but the pieces are there.
+GGUF mmap for inference, safetensors for zero-copy loading. The missing piece is
+mmap-based checkpointing with stable tensor offsets. That's a tractable problem.*
+
+---
+
+## Slide 11: Comparison with Alternatives (2 min)
 
 | Approach | Full deploy | Incremental | Rollback | Overhead |
 |----------|-----------|-------------|----------|----------|
 | S3 sync + download | O(model) | File-level | Re-download | Low |
 | rsync | O(model) checksum | Block-level | Re-sync | Medium |
 | Container layers | O(layer) | Layer-level | Tag swap | High |
-| **btrfs send/receive** | **O(model)** | **Block-level (CoW)** | **Instant** | **None** |
+| **btrfs send/receive** | **O(model)** | **Block-level (CoW)*** | **Instant** | **None** |
 
-*Speaker notes: btrfs CoW tracks which 4K blocks were actually written. With mmap-based
-formats (safetensors, GGUF) or partial writes, only touched blocks get new extents —
-send -p transmits a true block-level delta. Same for agent session memory (append/update).
-Full file rewrites (torch.save, dd) allocate all-new blocks and send the whole file.
-The key insight: use mmap-native formats and the delta efficiency holds. Rollback is
-always instant regardless — local snapshots, no network.*
+*Block-level delta requires CoW-friendly write pattern. Full-file rewrites send the full file.
+
+Where btrfs wins unconditionally: rollback, fan-out (tee to N hosts), zero-overhead snapshots, no checksumming pass.
+
+*Speaker notes: After the honesty of slides 9-10, this comparison lands with credibility.
+You've shown the limitation AND the path forward. The audience trusts the comparison now.*
 
 ---
 
@@ -238,7 +278,7 @@ Linux users?**
 
 ---
 
-## Slide 10: The Thesis (3 min)
+## Slide 12: The Thesis (3 min)
 
 **Containers solved packaging. Agents don't have a packaging problem.**
 
@@ -261,7 +301,7 @@ Linux users?**
 
 ---
 
-## Slide 11: Agent-as-User Architecture (3 min)
+## Slide 13: Agent-as-User Architecture (3 min)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -306,7 +346,7 @@ Linux users?**
 
 ---
 
-## Slide 12: cloud-init — The Agent Provisioner (3 min)
+## Slide 14: cloud-init — The Agent Provisioner (3 min)
 
 ```yaml
 #cloud-config
@@ -364,7 +404,7 @@ runcmd:
 
 ---
 
-## Slide 13: systemd — Lifecycle Without an Orchestrator (3 min)
+## Slide 15: systemd — Lifecycle Without an Orchestrator (3 min)
 
 ```ini
 # /etc/systemd/system/agent@.service
@@ -395,7 +435,7 @@ NoNewPrivileges=true
 
 ---
 
-## Slide 14: Privilege Separation & MCP Config (3 min)
+## Slide 16: Privilege Separation & MCP Config (3 min)
 
 **The OpenSSH model, applied to agents**
 
@@ -457,7 +497,7 @@ access. The privileged monitor is the gatekeeper.*
 
 ---
 
-## Slide 15: Memory Architecture — Three Tiers (3 min)
+## Slide 17: Memory Architecture — Three Tiers (3 min)
 
 | Tier | Backing | Lifetime | Replication |
 |------|---------|----------|-------------|
@@ -478,7 +518,7 @@ access. The privileged monitor is the gatekeeper.*
 
 ---
 
-## Slide 16: Event-Driven Activation & microVMs (3 min)
+## Slide 18: Event-Driven Activation & microVMs (3 min)
 
 ```
 Agent receives task
@@ -505,7 +545,7 @@ Agent receives task
 
 ---
 
-## Slide 17: Transparency & Peer Review (2 min)
+## Slide 19: Transparency & Peer Review (2 min)
 
 ```
 ~/work/
@@ -524,7 +564,7 @@ Agent receives task
 
 ---
 
-## Slide 18: The Bridge — btrfs as Universal Replication (3 min)
+## Slide 20: The Bridge — btrfs as Universal Replication (3 min)
 
 **One primitive for everything**
 
@@ -550,7 +590,7 @@ agent migration. No registry. No image layers. Just subvolumes and deltas.
 
 ---
 
-## Slide 19: Why Not Containers? (3 min)
+## Slide 21: Why Not Containers? (3 min)
 
 | Concern | Container/K8s | Agent-as-user |
 |---------|--------------|---------------|
@@ -571,7 +611,7 @@ to something that can manage itself.*
 
 ---
 
-## Slide 20: What This Doesn't Solve (Yet) (3 min)
+## Slide 22: What This Doesn't Solve (Yet) (3 min)
 
 | Problem | K8s gives you | We'd need to build |
 |---------|--------------|-------------------|
@@ -592,7 +632,7 @@ to something that can manage itself.*
 
 ---
 
-## Slide 21: Next Steps (2 min)
+## Slide 23: Next Steps (2 min)
 
 **Building:**
 - cloud-init module for agent provisioning (PR to cloud-init upstream)
@@ -612,7 +652,7 @@ cloud-init is the new orchestrator. btrfs is the new registry.**
 
 ---
 
-## Slide 22: Q&A (3 min)
+## Slide 24: Q&A (3 min)
 
 **Resources:**
 - Repository: github.com/davdunc/btrfs-replication-test

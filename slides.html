@@ -162,7 +162,55 @@ btrfs send --proto 2 --compressed-data \
 </table>
 </section>
 
-<!-- SLIDE 9: Comparison -->
+<!-- SLIDE 9: The Elephant in the Room -->
+<section>
+<h2>The Elephant in the Room</h2>
+<h3>CoW tracks <em>writes</em>, not <em>value changes</em></h3>
+<pre class="ascii">
+  torch.save(model, "weights.bin")     ← writes ALL blocks → ALL are new
+  btrfs send -p snap-v1 snap-v2       ← sees all-new blocks → sends 140GB
+
+  mmap'd tensor file, update layer 31  ← writes 2% of blocks → 2% are new
+  btrfs send -p snap-v1 snap-v2       ← sees 2% new blocks → sends ~2.8GB
+</pre>
+<table>
+<tr><th>Checkpoint pattern</th><th>Incremental send</th></tr>
+<tr><td class="warn">torch.save() / safetensors write</td><td class="warn">Full model (all blocks new)</td></tr>
+<tr><td class="warn">save_pretrained() to new file</td><td class="warn">Full model</td></tr>
+<tr><td class="accent">mmap + partial write (in-place)</td><td class="accent">Only touched blocks</td></tr>
+<tr><td class="accent">Sharded — unchanged shards</td><td class="accent">Zero bytes</td></tr>
+<tr><td class="accent">Agent session memory (append)</td><td class="accent">Only new blocks</td></tr>
+</table>
+<p class="fragment"><strong>Standard ML checkpointing defeats the delta.</strong><br>
+This is not a btrfs limitation — it's a format problem.</p>
+</section>
+
+<!-- SLIDE 10: The Format Fix -->
+<section>
+<h2>Making the Delta Real</h2>
+<h3>btrfs as transport primitive + CoW-friendly format</h3>
+<pre class="ascii">
+ Today's checkpoint:                    CoW-friendly checkpoint:
+ ┌──────────────────────┐               ┌──────────────────────┐
+ │ serialize entire      │               │ mmap'd flat file     │
+ │ state dict → new file │               │ fixed tensor offsets │
+ │ (all blocks new)      │               │ write only changed   │
+ └──────────────────────┘               │ pages via mmap       │
+                                        └──────────────────────┘
+ btrfs send: 140 GB                     btrfs send: ~2 GB
+</pre>
+<ul>
+<li><strong>Flat mmap'd tensor files</strong> with stable offsets per layer</li>
+<li>Fine-tuning writes only to modified layer pages</li>
+<li>LoRA adapters: base weights never written → zero delta</li>
+<li>GGUF already supports mmap for <em>inference</em> — extend to checkpointing</li>
+</ul>
+<p class="fragment"><span class="highlight">The interesting research question:</span><br>
+Design a checkpoint format where <code>btrfs send -p</code> = semantic diff.<br>
+btrfs is the transport. The format makes it efficient.</p>
+</section>
+
+<!-- SLIDE 11: Comparison -->
 <section>
 <h2>Comparison with Alternatives</h2>
 <table>
@@ -170,11 +218,12 @@ btrfs send --proto 2 --compressed-data \
 <tr><td>S3 sync</td><td>O(model)</td><td>File-level</td><td>Re-download</td><td>Low</td></tr>
 <tr><td>rsync</td><td>O(model) checksum</td><td>Block-level</td><td>Re-sync</td><td>Medium</td></tr>
 <tr><td>Container layers</td><td>O(layer)</td><td>Layer-level</td><td>Tag swap</td><td>High</td></tr>
-<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>Block-level (CoW)</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
+<tr><td class="accent"><strong>btrfs send/receive</strong></td><td class="accent"><strong>O(model)</strong></td><td class="accent"><strong>Block-level (CoW)*</strong></td><td class="accent"><strong>Instant</strong></td><td class="accent"><strong>None</strong></td></tr>
 </table>
-<p class="fragment">CoW tracks which 4K blocks were written. mmap/partial writes → true block-level delta.<br>
-Full file rewrite → all blocks are new, sends entire file. Use mmap-native formats.<br>
-Rollback is always instant (local snapshots). No checksumming needed.</p>
+<p>*Block-level delta requires CoW-friendly write pattern (mmap/partial/sharded).<br>
+Full-file rewrites send the full file. Rollback is always instant regardless.</p>
+<p class="fragment"><strong>Where btrfs wins unconditionally:</strong> rollback, fan-out (tee to N hosts),<br>
+zero-overhead snapshots, and no checksumming pass.</p>
 </section>
 
 <!-- TRANSITION -->
@@ -186,7 +235,7 @@ agent state, memory, work products?<br><br>
 And what if the agents themselves are just <strong>Linux users</strong>?</p>
 </section>
 
-<!-- SLIDE 10: The Thesis -->
+<!-- SLIDE 12: The Thesis -->
 <section>
 <h2>Agents as Service Account Users</h2>
 <p><strong>Containers solved packaging. Agents don't have a packaging problem.</strong></p>
@@ -205,7 +254,7 @@ And what if the agents themselves are just <strong>Linux users</strong>?</p>
 </pre>
 </section>
 
-<!-- SLIDE 11: Architecture -->
+<!-- SLIDE 13: Architecture -->
 <section>
 <h2>Agent-as-User Architecture</h2>
 <pre class="ascii">
@@ -239,7 +288,7 @@ And what if the agents themselves are just <strong>Linux users</strong>?</p>
 </pre>
 </section>
 
-<!-- SLIDE 12: cloud-init -->
+<!-- SLIDE 14: cloud-init -->
 <section>
 <h2>cloud-init: The Agent Provisioner</h2>
 <pre><code class="language-yaml">#cloud-config
@@ -275,7 +324,7 @@ runcmd:
 </section>
 
 
-<!-- SLIDE 13: systemd -->
+<!-- SLIDE 15: systemd -->
 <section>
 <h2>systemd: Lifecycle Without an Orchestrator</h2>
 <pre><code class="language-ini"># /etc/systemd/system/agent@.service
@@ -304,7 +353,7 @@ NoNewPrivileges=true</code></pre>
 </ul>
 </section>
 
-<!-- SLIDE 14: Privilege Separation -->
+<!-- SLIDE 16: Privilege Separation -->
 <section>
 <h2>Privilege Separation & MCP Config</h2>
 <h3>The OpenSSH model, applied to agents</h3>
@@ -334,7 +383,7 @@ Agents cannot grant themselves new capabilities.<br>
 MCP config is <strong>system policy</strong>, not user preference — same as <code>sshd_config</code>.</p>
 </section>
 
-<!-- SLIDE 15: Memory -->
+<!-- SLIDE 17: Memory -->
 <section>
 <h2>Memory Architecture: Three Tiers</h2>
 <table>
@@ -351,7 +400,7 @@ MCP config is <strong>system policy</strong>, not user preference — same as <c
 Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
 </section>
 
-<!-- SLIDE 16: Event-Driven -->
+<!-- SLIDE 18: Event-Driven -->
 <section>
 <h2>Event-Driven Activation & microVMs</h2>
 <pre class="ascii">
@@ -379,7 +428,7 @@ Agent receives task
 </ul>
 </section>
 
-<!-- SLIDE 17: Transparency -->
+<!-- SLIDE 19: Transparency -->
 <section>
 <h2>Transparency & Peer Review</h2>
 <pre><code class="language-bash">~/work/
@@ -397,7 +446,7 @@ Agent receives task
 </ul>
 </section>
 
-<!-- SLIDE 18: The Bridge -->
+<!-- SLIDE 20: The Bridge -->
 <section>
 <h2>btrfs: Universal Replication Layer</h2>
 <p><strong>One primitive for everything</strong></p>
@@ -419,7 +468,7 @@ Same mechanism. No registry. No image layers.</p>
 </section>
 
 
-<!-- SLIDE 19: Why Not Containers -->
+<!-- SLIDE 21: Why Not Containers -->
 <section>
 <h2>Why Not Containers?</h2>
 <table>
@@ -437,7 +486,7 @@ Same mechanism. No registry. No image layers.</p>
 Agents are <strong>stateful, autonomous, and self-managing</strong>.</p>
 </section>
 
-<!-- SLIDE 20: Gaps -->
+<!-- SLIDE 22: Gaps -->
 <section>
 <h2>What This Doesn't Solve (Yet)</h2>
 <table>
@@ -455,7 +504,7 @@ Dynamic task deps need workflow engine •
 Agents can't negotiate resources</p>
 </section>
 
-<!-- SLIDE 21: Next Steps -->
+<!-- SLIDE 23: Next Steps -->
 <section>
 <h2>Next Steps</h2>
 <h3>Building</h3>
@@ -480,7 +529,7 @@ Agents can't negotiate resources</p>
 </p>
 </section>
 
-<!-- SLIDE 22: Q&A -->
+<!-- SLIDE 24: Q&A -->
 <section>
 <h1>Q&A</h1>
 <p>
