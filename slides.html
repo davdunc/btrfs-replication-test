@@ -281,7 +281,7 @@ And what if the agents themselves are just <strong>Linux users</strong>?</p>
 <pre class="ascii fragment">
 2006: EC2 user-data     — shell scripts
 2010: cloud-init        — declarative config
-2015: Dockerfiles       — container packaging
+2015: Containerfiles    — container packaging
 2018: Helm charts       — container orchestration
 2026: cloud-init agents — agent provisioning  ← full circle
 </pre>
@@ -514,7 +514,7 @@ Same mechanism. No registry. No image layers.</p>
 <table>
 <tr><th>Concern</th><th>Container/K8s</th><th>Agent-as-User</th></tr>
 <tr><td>Isolation</td><td>Namespace + cgroup</td><td>UID + cgroup + systemd</td></tr>
-<tr><td>Packaging</td><td>Docker image layers</td><td>cloud-init user def</td></tr>
+<tr><td>Packaging</td><td>Container image layers</td><td>cloud-init user def</td></tr>
 <tr><td>Orchestration</td><td>Control plane</td><td>Agent self-management</td></tr>
 <tr><td>State</td><td>PVC / StatefulSet</td><td>btrfs subvolume</td></tr>
 <tr><td>Replication</td><td>Registry pull</td><td>btrfs send (incremental)</td></tr>
