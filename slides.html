@@ -439,22 +439,33 @@ Kill it, recreate from cloud-init, reconnect to long-term memory.</p>
 
 <!-- SLIDE 18: Event-Driven -->
 <section>
-<h2>Event-Driven Activation & microVMs</h2>
-<div class="mermaid" style="font-size:1.3em">
-flowchart TB
-    EVT["Event arrives<br/>(systemd .socket)"] --> WAKE["Socket activation<br/>spawns agent service"]
-    WAKE --> EVAL{"Agent evaluates task"}
-    EVAL -->|"Trusted"| LOCAL["On-host process<br/>⚡ 0ms overhead"]
-    EVAL -->|"Untrusted"| MVM["Firecracker microVM<br/>⚡ 125ms boot"]
-    EVAL -->|"Heavy compute"| CLOUD["EC2 Spot<br/>btrfs send/receive"]
-    LOCAL --> RESULT["Results → ~/work/"]
-    MVM --> RESULT
-    CLOUD --> RESULT
+<h2>Event-Driven Activation</h2>
+<div class="mermaid">
+flowchart LR
+    EVT["Event arrives<br/>(systemd .socket)"] --> WAKE["Socket activation<br/>spawns agent"]
+    WAKE --> EVAL{"Evaluate task"}
+    EVAL -->|"Trusted"| LOCAL["On-host<br/>0ms overhead"]
+    EVAL -->|"Untrusted"| MVM["Firecracker microVM<br/>125ms boot"]
+    EVAL -->|"Heavy"| CLOUD["EC2 Spot<br/>btrfs send/receive"]
+</div>
+<p>The agent <strong>IS</strong> the scheduler.</p>
+</section>
+
+<section>
+<h2>Output Review & Merge</h2>
+<div class="mermaid">
+flowchart LR
+    LOCAL["On-host"] --> RESULT["Results → ~/work/"]
+    MVM["microVM"] --> RESULT
+    CLOUD["EC2 Spot"] --> RESULT
     RESULT --> REVIEW{"Agent reviews"}
     REVIEW -->|"Accept"| MERGE["Merge into<br/>agent subvolume"]
     REVIEW -->|"Reject"| DISCARD["Discard scratch<br/>subvolume"]
 </div>
-<p>The agent <strong>IS</strong> the scheduler.</p>
+<ul>
+<li>Accept: snapshot merged into agent's persistent subvolume</li>
+<li>Reject: scratch subvolume discarded — zero cost (btrfs delete)</li>
+</ul>
 </section>
 
 <!-- SLIDE 19: Transparency -->
