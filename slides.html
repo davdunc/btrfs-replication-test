@@ -16,8 +16,8 @@
   .reveal table { font-size: 0.8em; margin: 0 auto; }
   .reveal th { background: #2d3748; color: #63b3ed; }
   .reveal td { background: #1a202c; }
-  .reveal .mermaid { font-size: 0.7em; }
-  .reveal .mermaid svg { max-height: 350px; }
+  .reveal .mermaid { font-size: 1.0em; }
+  .reveal .mermaid svg { max-height: 450px; }
   .reveal .slides section { display: flex !important; flex-direction: column; justify-content: flex-start; padding-top: 20px; }
   .reveal .slide-number { font-size: 14px; }
   .part-divider { color: #ed8936 !important; }
@@ -26,7 +26,7 @@
   .accent { color: #48bb78; }
   .warn { color: #fc8181; }
   .highlight { color: #ed8936; }
-  pre.ascii { font-size: 0.6em; line-height: 1.3; text-align: left; background: #1a202c; padding: 15px; border-radius: 8px; }
+  pre.ascii { font-size: 0.75em; line-height: 1.3; text-align: left; background: #1a202c; padding: 15px; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -423,7 +423,7 @@ MCP config is <strong>system policy</strong>, not user preference — same as <c
 <!-- SLIDE 17: Memory -->
 <section>
 <h2>Memory Architecture: Three Tiers</h2>
-<div class="mermaid" style="height:350px">
+<div class="mermaid">
 flowchart LR
     RT["Agent Runtime"] <--> W["Working<br/>tmpfs — Minutes"]
     RT <--> S["Session<br/>btrfs subvol — Days"]
@@ -589,7 +589,7 @@ mermaid.initialize({
     primaryColor: '#4299e1',
     primaryTextColor: '#e2e8f0',
     lineColor: '#a0aec0',
-    fontSize: '14px'
+    fontSize: '20px'
   }
 });
 Reveal.initialize({
