@@ -97,19 +97,27 @@ flowchart LR
 <section>
 <h2>Demo Environment</h2>
 <p>Fedora Cloud Base 43 on EC2 — two instances, btrfs data volumes</p>
-<pre><code class="language-bash"># User data: runs at boot
+<pre><code class="language-bash">#!/bin/bash
+set -ex
 dnf install -y btrfs-progs
+
+# Wait for the EBS data volume to attach
+while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
 
 mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
 mkdir -p /data
 mount -o noatime /dev/nvme1n1 /data
+echo '/dev/nvme1n1 /data btrfs noatime 0 0' >> /etc/fstab
 
 # Source only: create the model subvolume
 btrfs subvolume create /data/model</code></pre>
 <ul>
-<li>AMI: Fedora-Cloud-Base-AmazonEC2.x86_64-43</li>
-<li>Separate user-data for source and target</li>
-<li>50 GB gp3 volumes formatted as btrfs</li>
+<li>AMI: <code>Fedora-Cloud-Base-AmazonEC2.x86_64-43-20260420.0</code> (owner: 125523088429)</li>
+<li>Instance type: t3.medium (or larger)</li>
+<li>Separate user-data for source and target (target omits subvolume create)</li>
+<li>50 GB gp3 EBS volume attached as <code>/dev/xvdf</code> (appears as <code>/dev/nvme1n1</code>)</li>
+<li>Security group: SSH (22) from your IP + all traffic within the group (self-referencing)</li>
+<li>SSH agent forwarding (<code>ssh -A</code>) for source→target <code>btrfs send | ssh … btrfs receive</code></li>
 </ul>
 </section>
 
@@ -117,15 +125,16 @@ btrfs subvolume create /data/model</code></pre>
 <section>
 <h2>Demo: Write, Snapshot, Full Send</h2>
 <pre><code class="language-bash"># Write model data
-dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
-echo '{"model":"test-llm","version":"1.0"}' > /data/model/config.json
+sudo dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
+sudo bash -c 'echo {"model":"test-llm","version":"1.0"} > /data/model/config.json'
 
 # Read-only snapshot (required for send)
-btrfs subvolume snapshot -r /data/model /data/model-snap-v1
+sudo btrfs subvolume snapshot -r /data/model /data/model-snap-v1
 
 # Full send to target (protocol v2, compressed)
-btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
-  ssh fedora@target 'sudo btrfs receive /data/'</code></pre>
+# Requires: ssh -A (agent forwarding) from your workstation
+sudo btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
+  ssh fedora@TARGET_PRIVATE_IP 'sudo btrfs receive /data/'</code></pre>
 <ul>
 <li>Snapshot is <span class="accent">instantaneous</span> — CoW metadata operation</li>
 <li><code>--proto 2 --compressed-data</code>: no decompression overhead</li>
@@ -136,16 +145,16 @@ btrfs send --proto 2 --compressed-data /data/model-snap-v1 | \
 <section>
 <h2>Demo: Incremental Send</h2>
 <pre><code class="language-bash"># Model updated by training
-dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
-echo '{"model":"test-llm","version":"2.0"}' > /data/model/config.json
+sudo dd if=/dev/urandom of=/data/model/weights.bin bs=1M count=100
+sudo bash -c 'echo {"model":"test-llm","version":"2.0"} > /data/model/config.json'
 
 # New snapshot
-btrfs subvolume snapshot -r /data/model /data/model-snap-v2
+sudo btrfs subvolume snapshot -r /data/model /data/model-snap-v2
 
 # Incremental: only the delta between v1 and v2
-btrfs send --proto 2 --compressed-data \
+sudo btrfs send --proto 2 --compressed-data \
   -p /data/model-snap-v1 /data/model-snap-v2 | \
-  ssh fedora@target 'sudo btrfs receive /data/'</code></pre>
+  ssh fedora@TARGET_PRIVATE_IP 'sudo btrfs receive /data/'</code></pre>
 <p class="warn">⚠️ Never flip received read-only snapshots to read-write<br>
 — breaks <code>received_uuid</code>. Create a new writable snapshot instead.</p>
 </section>
@@ -166,6 +175,24 @@ btrfs send --proto 2 --compressed-data \
 <tr><td>Writable snapshot on target</td><td>O(1)</td><td>None</td></tr>
 <tr><td>Rollback</td><td>O(1)</td><td>None</td></tr>
 </table>
+</section>
+
+<!-- SLIDE 8b: Measured Benchmarks -->
+<section>
+<h2>Measured: 100MB Model on t3.medium</h2>
+<p>Validated 2026-04-20 — Fedora 43, gp3, us-east-2</p>
+<table>
+<tr><th>Operation</th><th>Stream Size</th><th>Time</th><th>% of Full</th></tr>
+<tr><td class="warn">Full send (100MB model)</td><td>101 MiB</td><td>0.161s</td><td>100%</td></tr>
+<tr><td class="warn">Incremental (full rewrite via dd)</td><td>101 MiB</td><td>0.773s</td><td>100%</td></tr>
+<tr><td class="accent">Incremental (2% partial write, in-place)</td><td>2.1 MiB</td><td>0.013s</td><td>~2%</td></tr>
+<tr><td class="accent">Incremental (1MB append)</td><td>1.1 MiB</td><td>0.006s</td><td>~1%</td></tr>
+</table>
+<ul>
+<li class="warn">Full rewrite (<code>dd</code>, <code>torch.save</code>) — incremental is <em>slower</em> than full send (comparison overhead)</li>
+<li class="accent">Partial in-place write — <strong>48× less data, 12× faster</strong></li>
+<li class="accent">Append-only (agent memory) — <strong>92× less data, 27× faster</strong></li>
+</ul>
 </section>
 
 <!-- SLIDE 9: The Elephant in the Room -->
