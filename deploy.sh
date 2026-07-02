@@ -1,15 +1,19 @@
 #!/bin/bash
+# openSUSE Tumbleweed variant for oSC26 (openSUSE Conference 2026)
 set -euo pipefail
 
 REGION="us-east-2"
-AMI="ami-01c7a4d75aaf8a437"  # Fedora-Cloud-Base-AmazonEC2.x86_64-43-20260305.0
-KEY="davdunc_amazon"
+KEY="davdunc-osc26"
 INSTANCE_TYPE="t3.large"
 SUBNET="subnet-2a7c5160"
 VOL_SIZE=50  # GB for btrfs data volume
 
 TAG_KEY="Project"
 TAG_VAL="btrfs-replication-test"
+
+# --- AMI Discovery: openSUSE Tumbleweed ---
+AMI="ami-08514d81e9c2df21f"  # openSUSE-Leap-16-0-v20260526-x86_64
+echo "Using AMI: $AMI"
 
 # --- Security Group ---
 echo "Creating security group..."
@@ -32,7 +36,7 @@ echo "Security group: $SG_ID"
 # Source: creates writable /data/model subvolume for writing model data
 USERDATA_SRC=$(cat <<'CLOUD'
 #!/bin/bash
-dnf install -y btrfs-progs
+zypper install -y btrfsprogs
 while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
 mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
 mkdir -p /data
@@ -46,7 +50,7 @@ CLOUD
 # Subvolumes arrive via btrfs receive; writable snapshots created from those.
 USERDATA_TGT=$(cat <<'CLOUD'
 #!/bin/bash
-dnf install -y btrfs-progs
+zypper install -y btrfsprogs
 while [ ! -b /dev/nvme1n1 ]; do sleep 1; done
 mkfs.btrfs -f -L btrfs-data /dev/nvme1n1
 mkdir -p /data
@@ -102,14 +106,15 @@ TGT_PRIV=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$TGT_ID
 
 cat <<EOF
 
-=== BTRFS Replication Test Environment ===
+=== BTRFS Replication Test Environment (openSUSE Tumbleweed) ===
+AMI:     $AMI
 Source:  $SRC_ID  public=$SRC_IP  private=$SRC_PRIV
 Target:  $TGT_ID  public=$TGT_IP  private=$TGT_PRIV
 SG:      $SG_ID
 
 SSH:
-  ssh -i ~/.ssh/davdunc_amazon fedora@$SRC_IP
-  ssh -i ~/.ssh/davdunc_amazon fedora@$TGT_IP
+  ssh -i ~/.ssh/davdunc_amazon ec2-user@$SRC_IP
+  ssh -i ~/.ssh/davdunc_amazon ec2-user@$TGT_IP
 
 Save these for cleanup:
   export SRC_ID=$SRC_ID TGT_ID=$TGT_ID SG_ID=$SG_ID REGION=$REGION
@@ -125,5 +130,6 @@ export TGT_IP=$TGT_IP
 export SRC_PRIV=$SRC_PRIV
 export TGT_PRIV=$TGT_PRIV
 export REGION=$REGION
+export AMI=$AMI
 EOF
 echo "Environment saved to env.sh"
